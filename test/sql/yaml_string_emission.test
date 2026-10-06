@@ -1,0 +1,35 @@
+# name: test/sql/yaml_string_emission.test
+# description: Emitted strings read back as strings without redundant quotes
+# group: [yaml]
+
+require yaml
+
+require json
+
+query TT
+SELECT ('k: "John"'::yaml)::VARCHAR, ('k: "123"'::yaml)::VARCHAR;
+----
+{k: John}	{k: "123"}
+
+query T
+SELECT yaml_to_json(('{a: "123", b: "true", c: "yes", d: "1.10", e: "0x10", f: ".inf", g: "~", h: "", i: "True"}'::yaml)::VARCHAR::yaml);
+----
+{"a":"123","b":"true","c":"yes","d":"1.10","e":"0x10","f":".inf","g":"~","h":"","i":"True"}
+
+query T
+SELECT ('{"<<": {a: 1}, "1": one}'::yaml)::VARCHAR;
+----
+{"<<": {a: 1}, "1": one}
+
+query TTT
+SELECT value_to_yaml({'a': '1', 'b': 1}), to_yaml(['2', 'x']), format_yaml({'a': 'yes'});
+----
+{a: "1", b: 1}	["2", x]	{a: "yes"}
+
+statement ok
+COPY (SELECT '123' AS s, 'yes' AS y, 'John' AS name, 1 AS n) TO '{TEST_DIR}/strings.yaml' (FORMAT yaml);
+
+query TTTTTT
+SELECT typeof(s), s, typeof(y), y, typeof(name), typeof(n) FROM read_yaml('{TEST_DIR}/strings.yaml');
+----
+VARCHAR	123	VARCHAR	yes	VARCHAR	BIGINT

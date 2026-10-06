@@ -3,6 +3,7 @@
 #include "duckdb_compat.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/time.hpp"
@@ -298,6 +299,33 @@ void ConfigureEmitter(YAML::Emitter &out, YAMLFormat format, idx_t indent) {
 	}
 }
 
+static bool NeedsQuotes(const std::string &value) {
+	auto lower = StringUtil::Lower(value);
+	if (lower == "y" || lower == "n" || lower == "yes" || lower == "no" || lower == "on" || lower == "off" ||
+	    lower == "true" || lower == "false" || lower == "<<") {
+		return true;
+	}
+	idx_t pos = 0;
+	if (pos < lower.size() && (lower[pos] == '-' || lower[pos] == '+')) {
+		pos++;
+	}
+	if (pos < lower.size() && lower[pos] == '.') {
+		pos++;
+	}
+	if (pos < lower.size() && StringUtil::CharacterIsDigit(lower[pos])) {
+		return true;
+	}
+	auto rest = lower.substr(pos);
+	return rest == "inf" || rest == "infinity" || rest == "nan";
+}
+
+static void EmitString(YAML::Emitter &out, const std::string &value) {
+	if (NeedsQuotes(value)) {
+		out << YAML::DoubleQuoted;
+	}
+	out << value;
+}
+
 static void EmitNodeWithStringStyleImpl(YAML::Emitter &out, const YAML::Node &node, YAMLStringStyle resolved_style,
                                         YAMLTraversalBudget &budget) {
 	YAMLBudgetScope scope(budget);
@@ -308,7 +336,7 @@ static void EmitNodeWithStringStyleImpl(YAML::Emitter &out, const YAML::Node &no
 		if (resolved_style == YAMLStringStyle::LITERAL && scalar.find('\n') != std::string::npos) {
 			out << YAML::Literal << scalar;
 		} else if (node.Tag() == "!" || node.Tag() == "tag:yaml.org,2002:str") {
-			out << YAML::DoubleQuoted << scalar;
+			EmitString(out, scalar);
 		} else {
 			out << node;
 		}
@@ -674,6 +702,12 @@ void EmitValueToYAML(YAML::Emitter &out, const Value &value) {
 	EmitValueToYAMLImpl(out, value, budget);
 }
 
+static YAML::Node StringNode(const std::string &value) {
+	YAML::Node node(value);
+	node.SetTag("!");
+	return node;
+}
+
 // Convert DuckDB Value to YAML::Node (respects emitter configuration)
 static YAML::Node ValueToYAMLNodeImpl(const Value &value, YAMLTraversalBudget &budget) {
 	YAMLBudgetScope scope(budget);
@@ -688,10 +722,10 @@ static YAML::Node ValueToYAMLNodeImpl(const Value &value, YAMLTraversalBudget &b
 				std::string json_str = value.GetValue<string>();
 				return YAML::Load(json_str); // Parse JSON as YAML
 			} catch (...) {
-				return YAML::Node(value.ToString());
+				return StringNode(value.ToString());
 			}
 		}
-		return YAML::Node(value.ToString());
+		return StringNode(value.ToString());
 	}
 	case LogicalTypeId::BOOLEAN:
 		return YAML::Node(value.GetValue<bool>());
@@ -744,12 +778,7 @@ std::string ValueToYAMLString(const Value &value, YAMLFormat format, YAMLStringS
 		// Now emit with proper format settings and string style
 		YAML::Emitter out;
 		ConfigureEmitter(out, format, indent);
-		auto resolved = ResolveStringStyle(string_style, format);
-		if (resolved == YAMLStringStyle::LITERAL) {
-			EmitNodeWithStringStyle(out, node, resolved);
-		} else {
-			out << node;
-		}
+		EmitNodeWithStringStyle(out, node, ResolveStringStyle(string_style, format));
 
 		// Check if we have a valid YAML string
 		if (out.good() && out.c_str() != nullptr) {
