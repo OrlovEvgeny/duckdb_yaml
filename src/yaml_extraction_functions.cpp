@@ -1,3 +1,4 @@
+#include "duckdb/common/error_data.hpp"
 #include "yaml_extraction_functions.hpp"
 #include "duckdb_compat.hpp"
 #include "yaml_types.hpp"
@@ -151,7 +152,7 @@ static void YAMLTypeUnaryFunction(DataChunk &args, ExpressionState &state, Vecto
 
 			return StringVector::AddString(result, type_str.c_str(), type_str.length());
 		} catch (const std::exception &e) {
-			throw InvalidInputException("Error parsing YAML: %s", e.what());
+			throw InvalidInputException("Error parsing YAML: %s", ErrorData(e).RawMessage());
 		}
 	});
 }
@@ -165,7 +166,7 @@ static void YAMLTypeBinaryFunction(DataChunk &args, ExpressionState &state, Vect
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 
@@ -194,7 +195,7 @@ static void YAMLTypeBinaryFunction(DataChunk &args, ExpressionState &state, Vect
 
 			    return StringVector::AddString(result, type_str.c_str(), type_str.length());
 		    } catch (const std::exception &e) {
-			    throw InvalidInputException("Error in yaml_type: %s", e.what());
+			    throw InvalidInputException("Error in yaml_type: %s", ErrorData(e).RawMessage());
 		    }
 	    });
 }
@@ -212,7 +213,7 @@ static void YAMLExtractFunction(DataChunk &args, ExpressionState &state, Vector 
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 
@@ -234,7 +235,7 @@ static void YAMLExtractFunction(DataChunk &args, ExpressionState &state, Vector 
 			    string yaml_result = out.c_str();
 			    return StringVector::AddString(result, yaml_result.c_str(), yaml_result.length());
 		    } catch (const std::exception &e) {
-			    throw InvalidInputException("Error in yaml_extract: %s", e.what());
+			    throw InvalidInputException("Error in yaml_extract: %s", ErrorData(e).RawMessage());
 		    }
 	    });
 }
@@ -249,7 +250,7 @@ static void YAMLExtractStringFunction(DataChunk &args, ExpressionState &state, V
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 
@@ -277,7 +278,7 @@ static void YAMLExtractStringFunction(DataChunk &args, ExpressionState &state, V
 			    string str_val = node.Scalar();
 			    return StringVector::AddString(result, str_val.c_str(), str_val.length());
 		    } catch (const std::exception &e) {
-			    throw InvalidInputException("Error in yaml_extract_string: %s", e.what());
+			    throw InvalidInputException("Error in yaml_extract_string: %s", ErrorData(e).RawMessage());
 		    }
 	    });
 }
@@ -294,7 +295,7 @@ static void YAMLExistsFunction(DataChunk &args, ExpressionState &state, Vector &
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 
@@ -469,12 +470,12 @@ static void YAMLStructureFunction(DataChunk &args, ExpressionState &state, Vecto
 
 		try {
 			yaml_utils::CheckInputSize(yaml_str.GetSize(), "yaml_structure");
-			YAML::Node root = YAML::Load(yaml_str.GetString());
+			YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			yaml_utils::CheckExpansionBudget(root);
 			string structure = BuildYAMLStructure(root);
 			return StringVector::AddString(result, structure);
 		} catch (const std::exception &e) {
-			throw InvalidInputException("Error in yaml_structure: %s", e.what());
+			throw InvalidInputException("Error in yaml_structure: %s", ErrorData(e).RawMessage());
 		}
 	});
 }
@@ -599,7 +600,7 @@ static YAML::Node YAMLMergePatch(const YAML::Node &target, const YAML::Node &pat
 	// Apply patch
 	for (auto it = patch.begin(); it != patch.end(); ++it) {
 		string key = it->first.Scalar();
-		const YAML::Node &patch_value = it->second;
+		const YAML::Node patch_value = it->second;
 
 		if (patch_value.IsNull()) {
 			// Null value removes the key
@@ -639,7 +640,7 @@ static void YAMLMergePatchFunction(DataChunk &args, ExpressionState &state, Vect
 
 			    return StringVector::AddString(result, out.c_str());
 		    } catch (const std::exception &e) {
-			    throw InvalidInputException("Error in yaml_merge_patch: %s", e.what());
+			    throw InvalidInputException("Error in yaml_merge_patch: %s", ErrorData(e).RawMessage());
 		    }
 	    });
 }
@@ -659,7 +660,7 @@ static void YAMLValueFunction(DataChunk &args, ExpressionState &state, Vector &r
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 
@@ -681,7 +682,7 @@ static void YAMLValueFunction(DataChunk &args, ExpressionState &state, Vector &r
 			    string str_val = node.Scalar();
 			    return StringVector::AddString(result, str_val);
 		    } catch (const std::exception &e) {
-			    throw InvalidInputException("Error in yaml_value: %s", e.what());
+			    throw InvalidInputException("Error in yaml_value: %s", ErrorData(e).RawMessage());
 		    }
 	    });
 }

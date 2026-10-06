@@ -4,6 +4,7 @@
 #include "yaml-cpp/yaml.h"
 #include <string>
 #include <vector>
+#include <atomic>
 
 namespace duckdb {
 
@@ -66,10 +67,10 @@ public:
 	static idx_t GetMaxInputSize();
 
 private:
-	static YAMLFormat default_format;
-	static idx_t max_expansion_nodes;
-	static idx_t max_nesting_depth;
-	static idx_t max_input_size;
+	static std::atomic<YAMLFormat> default_format;
+	static std::atomic<idx_t> max_expansion_nodes;
+	static std::atomic<idx_t> max_nesting_depth;
+	static std::atomic<idx_t> max_input_size;
 };
 
 //===--------------------------------------------------------------------===//
@@ -135,6 +136,8 @@ std::string EmitYAML(const YAML::Node &node, YAMLFormat format, YAMLStringStyle 
 // Emit multiple YAML documents
 std::string EmitYAMLMultiDoc(const std::vector<YAML::Node> &docs, YAMLFormat format);
 
+YAML::Node ExpandMerges(const YAML::Node &node);
+
 // Parse YAML string (supports multi-document)
 std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_document = true);
 
@@ -143,7 +146,7 @@ std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_docume
 //===--------------------------------------------------------------------===//
 
 // Convert YAML node to JSON string
-std::string YAMLNodeToJSON(const YAML::Node &node);
+std::string YAMLNodeToJSON(const YAML::Node &node, bool inference = false);
 
 //===--------------------------------------------------------------------===//
 // DuckDB Value to YAML Conversion

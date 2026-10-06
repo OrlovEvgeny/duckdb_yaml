@@ -1,4 +1,5 @@
 #include "yaml_reader.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "named_parameter_compat.hpp"
 #include "yaml_utils.hpp"
 #include "duckdb_compat.hpp"
@@ -13,6 +14,7 @@ namespace duckdb {
 
 // Options for read_yaml_frontmatter
 struct YAMLFrontmatterOptions {
+	bool ignore_errors = false;
 	bool as_yaml_objects = false;  // If true, expand fields as columns; if false, return single YAML column
 	bool include_content = false;  // If true, include file content after frontmatter
 	bool include_filename = false; // If true, include filename column
@@ -205,6 +207,8 @@ static unique_ptr<FunctionData> YAMLFrontmatterBind(ClientContext &context, Tabl
 			result->options.as_yaml_objects = BooleanValue::Get(kv.second);
 		} else if (kv_name == "content") {
 			result->options.include_content = BooleanValue::Get(kv.second);
+		} else if (kv_name == "ignore_errors") {
+			result->options.ignore_errors = BooleanValue::Get(kv.second);
 		} else if (kv_name == "filename") {
 			result->options.include_filename = BooleanValue::Get(kv.second);
 		}
@@ -218,66 +222,29 @@ static unique_ptr<FunctionData> YAMLFrontmatterBind(ClientContext &context, Tabl
 
 	if (!result->options.as_yaml_objects) {
 		// Default: expand fields as columns by merging schemas from all files
-		unordered_map<string, LogicalType> merged_types;
-		vector<string> column_order;
-		unordered_set<string> seen_columns;
-
+		vector<YAML::Node> sample_nodes;
+		vector<string> sample_sources;
 		for (const auto &file_path : result->file_paths) {
 			try {
-				string content = ReadFileContent(context, file_path);
-				auto extracted = ExtractFrontmatter(content);
-				string frontmatter = extracted.first;
-
-				if (frontmatter.empty()) {
-					continue;
+				auto extracted = ExtractFrontmatter(ReadFileContent(context, file_path));
+				auto node = yaml_utils::ExpandMerges(YAML::Load("\n" + extracted.first));
+				if (node.IsMap()) {
+					sample_nodes.push_back(node);
+					sample_sources.push_back(file_path);
 				}
-
-				// Parse the frontmatter YAML
-				YAML::Node node = YAML::Load(frontmatter);
-
-				if (!node.IsMap()) {
-					continue;
+			} catch (const std::exception &e) {
+				if (!result->options.ignore_errors) {
+					throw IOException("YAML frontmatter file '%s': %s", file_path, ErrorData(e).RawMessage());
 				}
-
-				// Process each field
-				for (auto it = node.begin(); it != node.end(); ++it) {
-					string key = it->first.Scalar();
-
-					// Track column order from first occurrence
-					if (seen_columns.find(key) == seen_columns.end()) {
-						column_order.push_back(key);
-						seen_columns.insert(key);
-					}
-
-					// Detect type
-					LogicalType value_type = YAMLReader::DetectYAMLType(it->second);
-
-					// Merge with existing type
-					auto existing = merged_types.find(key);
-					if (existing == merged_types.end()) {
-						merged_types[key] = value_type;
-					} else if (existing->second.id() == LogicalTypeId::STRUCT &&
-					           value_type.id() == LogicalTypeId::STRUCT) {
-						merged_types[key] = YAMLReader::MergeStructTypes(existing->second, value_type);
-					} else if (existing->second.id() != value_type.id()) {
-						// Widen compatible numerics across frontmatter docs; VARCHAR otherwise (issue #42).
-						if (existing->second.IsNumeric() && value_type.IsNumeric()) {
-							merged_types[key] = YAMLReader::WidenConflictingScalarTypes(existing->second, value_type);
-						} else {
-							merged_types[key] = LogicalType::VARCHAR;
-						}
-					}
-				}
-			} catch (...) {
-				// Skip files that fail to parse
 				continue;
 			}
 		}
-
-		// Add columns in order
-		for (const auto &col : column_order) {
-			names.push_back(CompatMakeName(col));
-			return_types.push_back(merged_types[col]);
+		auto type = YAMLReader::DetectJaggedYAMLType(context, sample_nodes, sample_sources);
+		if (type.id() == LogicalTypeId::STRUCT) {
+			for (const auto &child : StructType::GetChildTypes(type)) {
+				names.push_back(CompatMakeName(CompatIdentifierName(child.first)));
+				return_types.push_back(child.second);
+			}
 		}
 
 		// If no fields detected, add a dummy column
@@ -345,6 +312,7 @@ static void YAMLFrontmatterFunction(ClientContext &context, TableFunctionInput &
 				continue;
 			}
 
+			YAML::Node node = yaml_utils::ExpandMerges(YAML::Load("\n" + frontmatter));
 			idx_t col_idx = 0;
 
 			// Filename column
@@ -355,8 +323,6 @@ static void YAMLFrontmatterFunction(ClientContext &context, TableFunctionInput &
 			if (!bind_data.options.as_yaml_objects) {
 				// Default: parse frontmatter and extract fields as columns
 				try {
-					YAML::Node node = YAML::Load(frontmatter);
-
 					if (node.IsMap()) {
 						// Process each column (skip filename if present)
 						idx_t start_col = bind_data.options.include_filename ? 1 : 0;
@@ -383,14 +349,8 @@ static void YAMLFrontmatterFunction(ClientContext &context, TableFunctionInput &
 							output.SetValue(col_idx++, count, Value(bind_data.types[i]));
 						}
 					}
-				} catch (...) {
-					// Parse error - set all fields to NULL
-					idx_t start_col = bind_data.options.include_filename ? 1 : 0;
-					idx_t end_col =
-					    bind_data.options.include_content ? bind_data.names.size() - 1 : bind_data.names.size();
-					for (idx_t i = start_col; i < end_col; i++) {
-						output.SetValue(col_idx++, count, Value(bind_data.types[i]));
-					}
+				} catch (const std::exception &) {
+					throw;
 				}
 			} else {
 				// Return frontmatter as YAML string
@@ -404,7 +364,9 @@ static void YAMLFrontmatterFunction(ClientContext &context, TableFunctionInput &
 
 			count++;
 		} catch (const std::exception &e) {
-			// Skip files that can't be read
+			if (!bind_data.options.ignore_errors) {
+				throw IOException("YAML frontmatter file '%s': %s", file_path, ErrorData(e).RawMessage());
+			}
 			continue;
 		}
 	}
@@ -421,10 +383,11 @@ void RegisterYAMLFrontmatterFunction(ExtensionLoader &loader) {
 
 	// Add named parameters
 	DeclareNamedParameters(read_yaml_frontmatter, {
-		{"as_yaml_objects", LogicalType::BOOLEAN},
-		{"content", LogicalType::BOOLEAN},
-		{"filename", LogicalType::BOOLEAN},
-	});
+	                                                  {"as_yaml_objects", LogicalType::BOOLEAN},
+	                                                  {"content", LogicalType::BOOLEAN},
+	                                                  {"filename", LogicalType::BOOLEAN},
+	                                                  {"ignore_errors", LogicalType::BOOLEAN},
+	                                              });
 
 	CreateTableFunctionInfo info(std::move(read_yaml_frontmatter));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;

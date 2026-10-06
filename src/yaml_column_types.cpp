@@ -1,3 +1,4 @@
+#include "duckdb/common/error_data.hpp"
 #include "yaml_reader.hpp"
 #include "duckdb_compat.hpp"
 #include "duckdb/common/exception.hpp"
@@ -57,7 +58,7 @@ void YAMLReader::BindColumnTypes(ClientContext &context, TableFunctionBindInput 
 		try {
 			col_type = TransformStringToLogicalType(type_name, context);
 		} catch (const Exception &e) {
-			throw BinderException("Invalid type '" + type_name + "' for column '" + column_name + "': " + e.what());
+			throw BinderException("Invalid type '" + type_name + "' for column '" + column_name + "': " + ErrorData(e).RawMessage());
 		}
 
 		options.column_names.push_back(column_name);

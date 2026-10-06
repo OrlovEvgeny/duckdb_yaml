@@ -12,35 +12,35 @@ require yaml
 # Test 1: Basic optional field in nested array
 # The 'optional' field appears only in the second item and should be included in schema
 query I
-SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/optional_fields.yaml');
+SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/optional_fields.yaml', expand_root_sequence=true);
 ----
 STRUCT("name" VARCHAR, required VARCHAR, optional VARCHAR)[]
 
 # Verify the actual data includes the optional field
 query I
-SELECT items FROM read_yaml('test/yaml/schema_inference/optional_fields.yaml');
+SELECT items FROM read_yaml('test/yaml/schema_inference/optional_fields.yaml', expand_root_sequence=true);
 ----
 [{'name': first, 'required': value1, 'optional': NULL}, {'name': second, 'required': value2, 'optional': extra}, {'name': third, 'required': value3, 'optional': NULL}]
 
 # Test 2: Nested optional fields
 query I
-SELECT typeof(config.users) FROM read_yaml('test/yaml/schema_inference/nested_optional_fields.yaml');
+SELECT typeof(config.users) FROM read_yaml('test/yaml/schema_inference/nested_optional_fields.yaml', expand_root_sequence=true);
 ----
 STRUCT("name" VARCHAR, "role" VARCHAR, department VARCHAR, manager VARCHAR)[]
 
 # Verify nested data includes optional fields
 query I
-SELECT config.users[2].department FROM read_yaml('test/yaml/schema_inference/nested_optional_fields.yaml');
+SELECT config.users[2].department FROM read_yaml('test/yaml/schema_inference/nested_optional_fields.yaml', expand_root_sequence=true);
 ----
 engineering
 
 query I
-SELECT config.users[3].manager FROM read_yaml('test/yaml/schema_inference/nested_optional_fields.yaml');
+SELECT config.users[3].manager FROM read_yaml('test/yaml/schema_inference/nested_optional_fields.yaml', expand_root_sequence=true);
 ----
 admin
 
 query I
-SELECT config.users[1].department FROM read_yaml('test/yaml/schema_inference/nested_optional_fields.yaml');
+SELECT config.users[1].department FROM read_yaml('test/yaml/schema_inference/nested_optional_fields.yaml', expand_root_sequence=true);
 ----
 NULL
 
@@ -51,13 +51,13 @@ NULL
 
 # Test 3: Top-level sequence with optional fields (WORKS)
 query I
-SELECT typeof(optional) FROM read_yaml('test/yaml/schema_inference/optional_fields_sequence.yaml') LIMIT 1;
+SELECT typeof(optional) FROM read_yaml('test/yaml/schema_inference/optional_fields_sequence.yaml', expand_root_sequence=true) LIMIT 1;
 ----
 VARCHAR
 
 # The optional column should exist and have values
 query III
-SELECT name, required, optional FROM read_yaml('test/yaml/schema_inference/optional_fields_sequence.yaml');
+SELECT name, required, optional FROM read_yaml('test/yaml/schema_inference/optional_fields_sequence.yaml', expand_root_sequence=true);
 ----
 first	value1	NULL
 second	value2	extra
@@ -65,7 +65,7 @@ third	value3	NULL
 
 # Test 4: Multiple optional fields at top-level (WORKS)
 query IIIII
-SELECT id, name, email, phone, notes FROM read_yaml('test/yaml/schema_inference/multiple_optional_fields.yaml');
+SELECT id, name, email, phone, notes FROM read_yaml('test/yaml/schema_inference/multiple_optional_fields.yaml', expand_root_sequence=true);
 ----
 1	Alice	NULL	NULL	NULL
 2	Bob	bob@example.com	NULL	NULL
@@ -75,9 +75,9 @@ SELECT id, name, email, phone, notes FROM read_yaml('test/yaml/schema_inference/
 # Test 5: Verify column types are correct
 query IIIII
 SELECT typeof(id), typeof(name), typeof(email), typeof(phone), typeof(notes)
-FROM read_yaml('test/yaml/schema_inference/multiple_optional_fields.yaml') LIMIT 1;
+FROM read_yaml('test/yaml/schema_inference/multiple_optional_fields.yaml', expand_root_sequence=true) LIMIT 1;
 ----
-TINYINT	VARCHAR	VARCHAR	VARCHAR	VARCHAR
+BIGINT	VARCHAR	VARCHAR	VARCHAR	VARCHAR
 
 # ============================================================================
 # Comprehensive schema unioning tests (issue #32)
@@ -86,112 +86,112 @@ TINYINT	VARCHAR	VARCHAR	VARCHAR	VARCHAR
 
 # Test 6: Three-way disjoint - each object has completely different fields
 query I
-SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/three_way_disjoint.yaml');
+SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/three_way_disjoint.yaml', expand_root_sequence=true);
 ----
 STRUCT(alpha VARCHAR, beta VARCHAR, gamma VARCHAR)[]
 
 query I
-SELECT items FROM read_yaml('test/yaml/schema_inference/three_way_disjoint.yaml');
+SELECT items FROM read_yaml('test/yaml/schema_inference/three_way_disjoint.yaml', expand_root_sequence=true);
 ----
 [{'alpha': value_a, 'beta': NULL, 'gamma': NULL}, {'alpha': NULL, 'beta': value_b, 'gamma': NULL}, {'alpha': NULL, 'beta': NULL, 'gamma': value_c}]
 
 # Test 7: Progressive accumulation - each successive element adds a new field
 query I
-SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/progressive_accumulation.yaml');
+SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/progressive_accumulation.yaml', expand_root_sequence=true);
 ----
-STRUCT(a TINYINT, b TINYINT, c TINYINT, d TINYINT)[]
+STRUCT(a BIGINT, b BIGINT, c BIGINT, d BIGINT)[]
 
 query I
-SELECT items[4] FROM read_yaml('test/yaml/schema_inference/progressive_accumulation.yaml');
+SELECT items[4] FROM read_yaml('test/yaml/schema_inference/progressive_accumulation.yaml', expand_root_sequence=true);
 ----
 {'a': 4, 'b': 4, 'c': 4, 'd': 4}
 
 query I
-SELECT items[1].d FROM read_yaml('test/yaml/schema_inference/progressive_accumulation.yaml');
+SELECT items[1].d FROM read_yaml('test/yaml/schema_inference/progressive_accumulation.yaml', expand_root_sequence=true);
 ----
 NULL
 
 # Test 8: Sparse middle - field only appears in middle elements
 query I
-SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/sparse_middle.yaml');
+SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/sparse_middle.yaml', expand_root_sequence=true);
 ----
-STRUCT(id TINYINT, "name" VARCHAR, "temporary" VARCHAR)[]
+STRUCT(id BIGINT, "name" VARCHAR, "temporary" VARCHAR)[]
 
 query III
-SELECT items[1].temporary, items[2].temporary, items[4].temporary FROM read_yaml('test/yaml/schema_inference/sparse_middle.yaml');
+SELECT items[1].temporary, items[2].temporary, items[4].temporary FROM read_yaml('test/yaml/schema_inference/sparse_middle.yaml', expand_root_sequence=true);
 ----
 NULL	only here	NULL
 
 # Test 9: Four-way rotating - each element has one unique field plus common
 query I
-SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/four_way_rotating.yaml');
+SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/four_way_rotating.yaml', expand_root_sequence=true);
 ----
-STRUCT(common TINYINT, only_first VARCHAR, only_second VARCHAR, only_third VARCHAR, only_fourth VARCHAR)[]
+STRUCT(common BIGINT, only_first VARCHAR, only_second VARCHAR, only_third VARCHAR, only_fourth VARCHAR)[]
 
 # Test 10: Last element has unique field (opposite of original bug)
 query I
-SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/last_element_unique.yaml');
+SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/last_element_unique.yaml', expand_root_sequence=true);
 ----
-STRUCT(id TINYINT, "name" VARCHAR, final_only VARCHAR)[]
+STRUCT(id BIGINT, "name" VARCHAR, final_only VARCHAR)[]
 
 query I
-SELECT items[4].final_only FROM read_yaml('test/yaml/schema_inference/last_element_unique.yaml');
+SELECT items[4].final_only FROM read_yaml('test/yaml/schema_inference/last_element_unique.yaml', expand_root_sequence=true);
 ----
 unique to last
 
 # Test 11: Empty objects mixed with populated ones
 query I
-SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/empty_objects_mixed.yaml');
+SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/empty_objects_mixed.yaml', expand_root_sequence=true);
 ----
-STRUCT("name" VARCHAR, "value" TINYINT, extra VARCHAR)[]
+STRUCT("name" VARCHAR, "value" BIGINT, extra VARCHAR)[]
 
 query II
-SELECT items[1].name, items[2].name FROM read_yaml('test/yaml/schema_inference/empty_objects_mixed.yaml');
+SELECT items[1].name, items[2].name FROM read_yaml('test/yaml/schema_inference/empty_objects_mixed.yaml', expand_root_sequence=true);
 ----
 NULL	second
 
 # Test 12: Multiple arrays with different jagged patterns in same document
 query II
-SELECT typeof(users), typeof(products) FROM read_yaml('test/yaml/schema_inference/multiple_arrays_different_patterns.yaml');
+SELECT typeof(users), typeof(products) FROM read_yaml('test/yaml/schema_inference/multiple_arrays_different_patterns.yaml', expand_root_sequence=true);
 ----
 STRUCT("name" VARCHAR, email VARCHAR)[]	STRUCT(sku VARCHAR, price DOUBLE, discount DOUBLE)[]
 
 # Test 13: Deeply nested jagged structures
 query I
-SELECT typeof(data) FROM read_yaml('test/yaml/schema_inference/deeply_nested_jagged.yaml');
+SELECT typeof(data) FROM read_yaml('test/yaml/schema_inference/deeply_nested_jagged.yaml', expand_root_sequence=true);
 ----
-STRUCT(level1 STRUCT(items STRUCT(id TINYINT, info STRUCT("name" VARCHAR, extra VARCHAR, deep STRUCT("value" VARCHAR)))[]))
+STRUCT(level1 STRUCT(items STRUCT(id BIGINT, info STRUCT("name" VARCHAR, extra VARCHAR, deep STRUCT("value" VARCHAR)))[]))
 
 query I
-SELECT data.level1.items[2].info.extra FROM read_yaml('test/yaml/schema_inference/deeply_nested_jagged.yaml');
+SELECT data.level1.items[2].info.extra FROM read_yaml('test/yaml/schema_inference/deeply_nested_jagged.yaml', expand_root_sequence=true);
 ----
 nested_extra
 
 query I
-SELECT data.level1.items[3].info.deep.value FROM read_yaml('test/yaml/schema_inference/deeply_nested_jagged.yaml');
+SELECT data.level1.items[3].info.deep.value FROM read_yaml('test/yaml/schema_inference/deeply_nested_jagged.yaml', expand_root_sequence=true);
 ----
 deep_value
 
 # Test 14: Nested arrays where inner arrays have jagged schemas (issue #32 root cause)
 # The fix ensures that LIST fields inside STRUCTs are also merged
 query I
-SELECT typeof(groups) FROM read_yaml('test/yaml/schema_inference/nested_arrays_jagged.yaml');
+SELECT typeof(groups) FROM read_yaml('test/yaml/schema_inference/nested_arrays_jagged.yaml', expand_root_sequence=true);
 ----
 STRUCT("name" VARCHAR, members STRUCT("user" VARCHAR, "role" VARCHAR, department VARCHAR)[])[]
 
 query I
-SELECT groups[2].members[1].department FROM read_yaml('test/yaml/schema_inference/nested_arrays_jagged.yaml');
+SELECT groups[2].members[1].department FROM read_yaml('test/yaml/schema_inference/nested_arrays_jagged.yaml', expand_root_sequence=true);
 ----
 sales
 
 query I
-SELECT groups[1].members[1].department FROM read_yaml('test/yaml/schema_inference/nested_arrays_jagged.yaml');
+SELECT groups[1].members[1].department FROM read_yaml('test/yaml/schema_inference/nested_arrays_jagged.yaml', expand_root_sequence=true);
 ----
 NULL
 
 # Test 15: Top-level sequence (multi-document) with jagged schemas
 query IIII
-SELECT id, name, email, phone FROM read_yaml('test/yaml/schema_inference/top_level_sequence_jagged.yaml', multi_document=true);
+SELECT id, name, email, phone FROM read_yaml('test/yaml/schema_inference/top_level_sequence_jagged.yaml', expand_root_sequence=true, multi_document=true);
 ----
 1	first	NULL	NULL
 2	second	second@example.com	NULL
@@ -211,7 +211,7 @@ SELECT typeof(docs) FROM read_yaml([
     'test/yaml/schema_inference/type_mismatch_scalar_struct.yaml'
 ]) LIMIT 1;
 ----
-yaml
+JSON
 
 # Both values should be preserved as YAML strings
 query II
@@ -220,5 +220,5 @@ SELECT extension.name, docs FROM read_yaml([
     'test/yaml/schema_inference/type_mismatch_scalar_struct.yaml'
 ]) ORDER BY extension.name;
 ----
-other_extension	{hello_world: Example code here, extended_description: More details}
-test_extension	https://example.com/docs
+other_extension	{"hello_world":"Example code here","extended_description":"More details"}
+test_extension	"https://example.com/docs"

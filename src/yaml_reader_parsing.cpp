@@ -1,3 +1,4 @@
+#include "duckdb/common/error_data.hpp"
 #include "yaml_reader.hpp"
 #include "duckdb/common/string_util.hpp"
 
@@ -53,7 +54,7 @@ vector<YAML::Node> YAMLReader::ParseMultiDocumentYAML(const string &yaml_content
 		return valid_docs;
 	} catch (const YAML::Exception &e) {
 		if (!ignore_errors) {
-			throw IOException("Error parsing YAML file: " + string(e.what()));
+			throw IOException("Error parsing YAML file: " + string(ErrorData(e).RawMessage()));
 		}
 
 		// On error with ignore_errors=true, try to recover partial documents
@@ -66,6 +67,9 @@ vector<YAML::Node> YAMLReader::ExtractRowNodes(const vector<YAML::Node> &docs, b
 	vector<YAML::Node> row_nodes;
 
 	for (const auto &doc : docs) {
+		if (!doc.IsDefined() || doc.IsNull()) {
+			continue;
+		}
 		if (doc.IsSequence() && expand_root_sequence) {
 			// Each item in the sequence becomes a row
 			for (size_t idx = 0; idx < doc.size(); idx++) {
@@ -73,7 +77,7 @@ vector<YAML::Node> YAMLReader::ExtractRowNodes(const vector<YAML::Node> &docs, b
 					row_nodes.push_back(doc[idx]);
 				}
 			}
-		} else if (doc.IsMap()) {
+		} else {
 			// Document itself becomes a row
 			row_nodes.push_back(doc);
 		}
@@ -143,7 +147,7 @@ vector<YAML::Node> YAMLReader::RecoverPartialYAMLDocuments(const string &yaml_co
 			// Skip empty documents or just whitespace/comments
 			string trimmed = doc_str;
 			StringUtil::Trim(trimmed);
-			if (trimmed.empty() || trimmed[0] == '#') {
+			if (trimmed.empty()) {
 				continue;
 			}
 

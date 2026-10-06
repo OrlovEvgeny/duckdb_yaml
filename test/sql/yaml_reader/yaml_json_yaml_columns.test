@@ -16,7 +16,7 @@ query IIIIII
 DESCRIBE yaml_columns;
 ----
 name	yaml	YES	NULL	NULL	NULL
-age	TINYINT	YES	NULL	NULL	NULL
+age	BIGINT	YES	NULL	NULL	NULL
 is_active	yaml	YES	NULL	NULL	NULL
 
 # Verify the data - name and is_active should be YAML strings

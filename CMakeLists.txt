@@ -1,18 +1,17 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.5...3.29)
 
 # Set extension name here
 set(TARGET_NAME yaml)
 
-# DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
-# used in cmake with find_package. Feel free to remove or replace with other dependencies.
-# Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
-find_package(yaml-cpp REQUIRED)
+if(NOT TARGET yaml-cpp::yaml-cpp)
+  find_package(yaml-cpp REQUIRED)
+endif()
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
-include_directories(src/include)
+include_directories(src/include ${DUCKDB_MODULE_BASE_DIR}/extension/json/include)
 
 set(EXTENSION_SOURCES
   src/yaml_extension.cpp
@@ -49,12 +48,18 @@ if(MSVC)
 endif()
 
 
-# Link OpenSSL in both the static library as the loadable extension
-target_link_libraries(${EXTENSION_NAME} yaml-cpp::yaml-cpp)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} yaml-cpp::yaml-cpp)
+# Share schema inference and value conversion with the JSON extension.
+target_link_libraries(${EXTENSION_NAME} yaml-cpp::yaml-cpp json_extension)
+target_link_libraries(${LOADABLE_EXTENSION_NAME} yaml-cpp::yaml-cpp json_extension)
 
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+option(YAML_ALLOW_GLOBAL_SETTERS "Register process-wide YAML setters" OFF)
+if(NOT YAML_ALLOW_GLOBAL_SETTERS)
+  target_compile_definitions(${EXTENSION_NAME} PRIVATE YAML_DISABLE_GLOBAL_SETTERS)
+  target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE YAML_DISABLE_GLOBAL_SETTERS)
+endif()

@@ -35,14 +35,14 @@ true
 
 # Test with WHERE filtering
 query I
-SELECT name FROM 'test/yaml/sequence_basic.yaml' WHERE age > 29;
+SELECT name FROM read_yaml('test/yaml/sequence_basic.yaml', expand_root_sequence=true) WHERE age > 29;
 ----
 John
 Bob
 
 # Test with aggregation
 query I
-SELECT COUNT(*) FROM 'test/yaml/sequence_basic.yaml';
+SELECT COUNT(*) FROM read_yaml('test/yaml/sequence_basic.yaml', expand_root_sequence=true);
 ----
 3
 

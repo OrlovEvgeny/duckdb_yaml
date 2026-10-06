@@ -106,13 +106,13 @@ COPY (SELECT * FROM layout_test) TO '__TEST_DIR__/document_flow.yaml' (FORMAT ya
 
 # Verify sequence layout files can be read back
 query II
-SELECT id, name FROM read_yaml('__TEST_DIR__/sequence_flow.yaml') ORDER BY id;
+SELECT id, name FROM read_yaml('__TEST_DIR__/sequence_flow.yaml', expand_root_sequence=true) ORDER BY id;
 ----
 1	First
 2	Second
 
 query II
-SELECT id, name FROM read_yaml('__TEST_DIR__/sequence_block.yaml') ORDER BY id;
+SELECT id, name FROM read_yaml('__TEST_DIR__/sequence_block.yaml', expand_root_sequence=true) ORDER BY id;
 ----
 1	First
 2	Second

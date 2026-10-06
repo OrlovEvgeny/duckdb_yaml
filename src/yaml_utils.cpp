@@ -1,4 +1,5 @@
 #include "yaml_utils.hpp"
+#include "json_common.hpp"
 #include "duckdb_compat.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/exception.hpp"
@@ -10,6 +11,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include "duckdb/common/error_data.hpp"
+#include "duckdb/common/types/string_type.hpp"
+#include <unordered_set>
+#include <unordered_map>
+#include "simdutf.h"
 
 namespace duckdb {
 
@@ -20,12 +26,12 @@ namespace yaml_utils {
 //===--------------------------------------------------------------------===//
 
 // Initialize default format to FLOW for better compatibility with SQLLogicTest
-YAMLFormat YAMLSettings::default_format = YAMLFormat::FLOW;
+std::atomic<YAMLFormat> YAMLSettings::default_format = YAMLFormat::FLOW;
 
 // Resource-limit defaults (see yaml_utils.hpp / GHSA-h5hw-g5m6-vmjj)
-idx_t YAMLSettings::max_expansion_nodes = YAML_DEFAULT_MAX_EXPANSION_NODES;
-idx_t YAMLSettings::max_nesting_depth = YAML_DEFAULT_MAX_NESTING_DEPTH;
-idx_t YAMLSettings::max_input_size = YAML_DEFAULT_MAX_INPUT_SIZE;
+std::atomic<idx_t> YAMLSettings::max_expansion_nodes = YAML_DEFAULT_MAX_EXPANSION_NODES;
+std::atomic<idx_t> YAMLSettings::max_nesting_depth = YAML_DEFAULT_MAX_NESTING_DEPTH;
+std::atomic<idx_t> YAMLSettings::max_input_size = YAML_DEFAULT_MAX_INPUT_SIZE;
 
 YAMLFormat YAMLSettings::GetDefaultFormat() {
 	return default_format;
@@ -65,14 +71,12 @@ YAMLBudgetScope::YAMLBudgetScope(YAMLTraversalBudget &budget_p) : budget(budget_
 	if (++budget.nodes > budget.max_nodes) {
 		throw InvalidInputException(
 		    "YAML expansion exceeded the maximum node budget (%llu); the input may contain an alias/anchor "
-		    "expansion bomb. Raise the limit with yaml_set_max_expansion_nodes(N) if this is a legitimate document.",
+		    "expansion bomb.",
 		    (unsigned long long)budget.max_nodes);
 	}
 	if (++budget.depth > budget.max_depth) {
-		throw InvalidInputException(
-		    "YAML nesting exceeded the maximum depth (%llu). Raise the limit with yaml_set_max_nesting_depth(N) if "
-		    "this is a legitimate document.",
-		    (unsigned long long)budget.max_depth);
+		throw InvalidInputException("YAML nesting exceeded the maximum depth (%llu).",
+		                            (unsigned long long)budget.max_depth);
 	}
 }
 
@@ -83,41 +87,175 @@ YAMLBudgetScope::~YAMLBudgetScope() {
 void CheckInputSize(idx_t size, const char *context) {
 	idx_t limit = YAMLSettings::GetMaxInputSize();
 	if (size > limit) {
-		throw InvalidInputException("YAML input to %s (%llu bytes) exceeds the maximum allowed size (%llu bytes). "
-		                            "Raise the limit with yaml_set_max_input_size(N).",
+		throw InvalidInputException("YAML input to %s (%llu bytes) exceeds the maximum allowed size (%llu bytes).",
 		                            context, (unsigned long long)size, (unsigned long long)limit);
 	}
 }
 
-static void CheckExpansionBudgetImpl(const YAML::Node &node, YAMLTraversalBudget &budget) {
-	if (!node) {
-		return;
-	}
-	YAMLBudgetScope scope(budget);
-	switch (node.Type()) {
-	case YAML::NodeType::Sequence:
-		for (idx_t i = 0; i < node.size(); i++) {
-			CheckExpansionBudgetImpl(node[i], budget);
+// Estimate the expanded tree on the alias DAG before materializing any aliases.
+// Marks bucket node identities so ordinary documents remain linear in their size.
+struct ExpansionCost {
+	YAML::Node node;
+	bool active = true;
+	idx_t nodes = 1;
+	idx_t bytes = 1;
+};
+
+struct ExpansionCheck {
+	std::unordered_map<int, vector<unique_ptr<ExpansionCost>>> seen;
+	idx_t input_bytes = 0;
+	YAMLTraversalBudget budget;
+
+	ExpansionCost &Visit(const YAML::Node &node) {
+		auto &bucket = seen[node.Mark().pos];
+		for (auto &entry : bucket) {
+			if (entry->node.is(node)) {
+				if (entry->active) {
+					throw YAML::ParserException(node.Mark(), "YAML cyclic alias (nesting cycle)");
+				}
+				return *entry;
+			}
 		}
-		break;
-	case YAML::NodeType::Map:
-		for (auto it = node.begin(); it != node.end(); ++it) {
-			CheckExpansionBudgetImpl(it->second, budget);
+		YAMLBudgetScope scope(budget);
+		auto entry = make_uniq<ExpansionCost>();
+		entry->node.reset(node);
+		auto &cost = *entry;
+		bucket.push_back(std::move(entry));
+		if (node.IsScalar()) {
+			const auto &scalar = node.Scalar();
+			if (!simdutf::validate_utf8(scalar.data(), scalar.size())) {
+				throw YAML::ParserException(node.Mark(), "Invalid UTF-8 in YAML scalar");
+			}
+			cost.bytes += scalar.size();
 		}
-		break;
-	default:
-		break;
+		input_bytes += cost.bytes;
+		auto add = [&](const YAML::Node &child) {
+			auto &child_cost = Visit(child);
+			cost.nodes += child_cost.nodes;
+			cost.bytes += child_cost.bytes;
+			if (cost.nodes > MinValue<idx_t>(budget.max_nodes, 1000000) || cost.bytes > 67108864) {
+				throw YAML::ParserException(child.Mark(),
+				                            "YAML expansion exceeded the maximum node budget or output size");
+			}
+		};
+		if (node.IsMap()) {
+			for (const auto &pair : node) {
+				add(pair.first);
+				add(pair.second);
+			}
+		} else if (node.IsSequence()) {
+			for (const auto &child : node) {
+				add(child);
+			}
+		}
+		cost.active = false;
+		return cost;
 	}
-}
+};
 
 void CheckExpansionBudget(const YAML::Node &node) {
-	YAMLTraversalBudget budget;
-	CheckExpansionBudgetImpl(node, budget);
+	try {
+		ExpansionCheck check;
+		auto &cost = check.Visit(node);
+		// Distinct node payload is a conservative lower bound on source text size.
+		if (cost.bytes > MaxValue<idx_t>(65536, check.input_bytes * 64)) {
+			throw YAML::ParserException(node.Mark(), "YAML alias expansion exceeds 64 times the input payload size");
+		}
+	} catch (const YAML::Exception &e) {
+		throw InvalidInputException("%s", ErrorData(e).RawMessage());
+	}
 }
 
 //===--------------------------------------------------------------------===//
 // YAML Parsing and Emission
 //===--------------------------------------------------------------------===//
+
+static bool IsMergeKey(const YAML::Node &key) {
+	return key.IsScalar() && key.Scalar() == "<<" && (key.Tag() == "?" || key.Tag() == "tag:yaml.org,2002:merge");
+}
+
+static YAML::Node ExpandMergesImpl(const YAML::Node &node, YAMLTraversalBudget &budget) {
+	YAMLBudgetScope scope(budget);
+	if (node.IsSequence()) {
+		for (auto child : node) {
+			YAML::Node value = child;
+			value = ExpandMergesImpl(value, budget);
+		}
+		return node;
+	}
+	if (!node.IsMap()) {
+		return node;
+	}
+	bool has_merge = false;
+	std::unordered_set<string> keys;
+	for (const auto &pair : node) {
+		if (!pair.first.IsScalar()) {
+			throw YAML::ParserException(pair.first.Mark(), pair.first.IsNull() ? "YAML mapping keys must not be null"
+			                                                                   : "YAML mapping keys must be scalars");
+		}
+		if (!keys.insert(StringUtil::Lower(pair.first.Scalar())).second) {
+			throw YAML::ParserException(pair.first.Mark(), "Duplicate key (case-insensitive): " + pair.first.Scalar());
+		}
+		if (IsMergeKey(pair.first)) {
+			has_merge = true;
+		} else {
+			YAML::Node value = pair.second;
+			value = ExpandMergesImpl(value, budget);
+		}
+	}
+	if (!has_merge) {
+		return node;
+	}
+	YAML::Node result(YAML::NodeType::Map);
+	for (const auto &pair : node) {
+		if (!IsMergeKey(pair.first)) {
+			result.force_insert(pair.first, pair.second);
+		}
+	}
+	for (const auto &pair : node) {
+		if (!IsMergeKey(pair.first)) {
+			continue;
+		}
+		auto source = ExpandMergesImpl(pair.second, budget);
+		auto merge = [&](const YAML::Node &map) {
+			if (!map.IsMap()) {
+				throw YAML::ParserException(pair.first.Mark(), "YAML merge requires a mapping or sequence of mappings");
+			}
+			for (const auto &entry : map) {
+				const auto key = entry.first.Scalar();
+				if (!static_cast<const YAML::Node &>(result)[key]) {
+					result.force_insert(entry.first, entry.second);
+				}
+			}
+		};
+		if (source.IsSequence()) {
+			for (const auto &map : source) {
+				merge(map);
+			}
+		} else {
+			merge(source);
+		}
+	}
+	// Preserve the source mark used by document-level diagnostics.
+	YAML::Node original = node;
+	original.remove("<<");
+	for (const auto &entry : result) {
+		if (!static_cast<const YAML::Node &>(original)[entry.first.Scalar()]) {
+			original.force_insert(entry.first, entry.second);
+		}
+	}
+	return original;
+}
+
+YAML::Node ExpandMerges(const YAML::Node &node) {
+	YAMLTraversalBudget budget;
+	try {
+		CheckExpansionBudget(node);
+		return ExpandMergesImpl(node, budget);
+	} catch (const InvalidInputException &e) {
+		throw YAML::ParserException(node.Mark(), ErrorData(e).RawMessage());
+	}
+}
 
 std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_doc) {
 	if (yaml_str.empty()) {
@@ -127,14 +265,18 @@ std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_doc) {
 	try {
 		std::stringstream yaml_stream(yaml_str);
 		if (multi_doc) {
-			return YAML::LoadAll(yaml_stream);
+			auto docs = YAML::LoadAll(yaml_stream);
+			for (auto &doc : docs) {
+				doc.reset(ExpandMerges(doc));
+			}
+			return docs;
 		} else {
 			std::vector<YAML::Node> result;
-			result.push_back(YAML::Load(yaml_stream));
+			result.push_back(ExpandMerges(YAML::Load(yaml_stream)));
 			return result;
 		}
 	} catch (const std::exception &e) {
-		throw InvalidInputException("Error parsing YAML: %s", e.what());
+		throw InvalidInputException("Error parsing YAML: %s", ErrorData(e).RawMessage());
 	}
 }
 
@@ -165,6 +307,8 @@ static void EmitNodeWithStringStyleImpl(YAML::Emitter &out, const YAML::Node &no
 		// Only apply Literal style to scalars that actually contain newlines
 		if (resolved_style == YAMLStringStyle::LITERAL && scalar.find('\n') != std::string::npos) {
 			out << YAML::Literal << scalar;
+		} else if (node.Tag() == "!" || node.Tag() == "tag:yaml.org,2002:str") {
+			out << YAML::DoubleQuoted << scalar;
 		} else {
 			out << node;
 		}
@@ -182,8 +326,7 @@ static void EmitNodeWithStringStyleImpl(YAML::Emitter &out, const YAML::Node &no
 		out << YAML::BeginMap;
 		for (const auto &pair : node) {
 			out << YAML::Key;
-			// Keys always use default emission (never literal)
-			out << pair.first;
+			EmitNodeWithStringStyleImpl(out, pair.first, YAMLStringStyle::QUOTED, budget);
 			out << YAML::Value;
 			EmitNodeWithStringStyleImpl(out, pair.second, resolved_style, budget);
 		}
@@ -209,11 +352,7 @@ std::string EmitYAML(const YAML::Node &node, YAMLFormat format, YAMLStringStyle 
 	YAML::Emitter out;
 	ConfigureEmitter(out, format, indent);
 	auto resolved = ResolveStringStyle(string_style, format);
-	if (resolved == YAMLStringStyle::LITERAL) {
-		EmitNodeWithStringStyle(out, node, resolved);
-	} else {
-		out << node;
-	}
+	EmitNodeWithStringStyle(out, node, resolved);
 	return out.c_str();
 }
 
@@ -252,46 +391,6 @@ std::string EmitYAMLMultiDoc(const std::vector<YAML::Node> &docs, YAMLFormat for
 //===--------------------------------------------------------------------===//
 // YAML to JSON Conversion
 //===--------------------------------------------------------------------===//
-
-// Helper function to check if a string might be a date/timestamp
-static bool TryDetectDateOrTimestamp(const std::string &value, std::string &json_value) {
-	// Try to parse as date first
-	idx_t pos = 0;
-	date_t date_result;
-	bool special = false;
-
-	auto date_cast_result = Date::TryConvertDate(value.c_str(), value.length(), pos, date_result, special, false);
-	if (date_cast_result == DateCastResult::SUCCESS && pos == value.length()) {
-		// Successfully parsed as date, format it in JSON date format
-		json_value = "\"" + Date::ToString(date_result) + "\"";
-		return true;
-	}
-
-	// Try to parse as timestamp
-	timestamp_t timestamp_result;
-	if (Timestamp::TryConvertTimestamp(value.c_str(), value.length(), timestamp_result, false) ==
-	    TimestampCastResult::SUCCESS) {
-		// Successfully parsed as timestamp, format it in ISO 8601 format with Z suffix for JSON compatibility
-		auto timestamp_str = Timestamp::ToString(timestamp_result);
-		// Check if timestamp already has timezone info
-		if (timestamp_str.find('+') == std::string::npos && timestamp_str.find('Z') == std::string::npos) {
-			timestamp_str += "Z"; // Add UTC timezone indicator
-		}
-		json_value = "\"" + timestamp_str + "\"";
-		return true;
-	}
-
-	// Try to parse as time
-	pos = 0;
-	dtime_t time_result;
-	if (Time::TryConvertTime(value.c_str(), value.length(), pos, time_result, false) && pos == value.length()) {
-		// Successfully parsed as time, format it in JSON time format
-		json_value = "\"" + Time::ToString(time_result) + "\"";
-		return true;
-	}
-
-	return false;
-}
 
 // JSON-escape a string per RFC 8259 and wrap it in quotes: the named short escapes plus
 // \u00XX for any control character (< 0x20). Used for BOTH string scalar values and map keys.
@@ -339,7 +438,7 @@ static std::string EscapeJSONString(const std::string &value) {
 	return result;
 }
 
-static std::string YAMLNodeToJSONImpl(const YAML::Node &node, YAMLTraversalBudget &budget) {
+static std::string YAMLNodeToJSONImpl(const YAML::Node &node, YAMLTraversalBudget &budget, bool inference) {
 	if (!node) {
 		return "null";
 	}
@@ -351,70 +450,29 @@ static std::string YAMLNodeToJSONImpl(const YAML::Node &node, YAMLTraversalBudge
 	case YAML::NodeType::Scalar: {
 		const auto value = node.Scalar();
 
-		// Check for boolean values (case-insensitive)
-		std::string lower_value = value;
-		std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(), ::tolower);
-
-		if (lower_value == "true" || lower_value == "yes" || lower_value == "on" || lower_value == "y" ||
-		    lower_value == "t") {
-			return "true";
-		} else if (lower_value == "false" || lower_value == "no" || lower_value == "off" || lower_value == "n" ||
-		           lower_value == "f") {
-			return "false";
-		} else if (lower_value == "null" || value == "~" || value == "") {
-			return "null";
-		}
-
-		// Try to parse as number (integer first, then double)
-		try {
-			// Skip numeric detection for values that look like dates/times
-			bool might_be_temporal = false;
-			if (value.find('-') != std::string::npos || value.find(':') != std::string::npos) {
-				might_be_temporal = true;
+		// Quoted and explicitly tagged strings retain their JSON string representation.
+		if (node.Tag() != "!" && node.Tag() != "tag:yaml.org,2002:str") {
+			if (value == "true" || value == "false" || value == "null") {
+				return value;
 			}
-
-			if (!might_be_temporal) {
-				// Check if it's an integer using DuckDB's Value casting
-				try {
-					Value string_val(value);
-					Value int_val = string_val.DefaultCastAs(LogicalType::BIGINT);
-					// If casting succeeded and the result converts back to the same string, it's a valid integer
-					if (int_val.ToString() == value) {
-						return value; // It's an integer, return as is
-					}
-				} catch (...) {
-					// Not a valid integer, continue
-				}
-
-				// Check if it's a double using DuckDB's Value casting
-				try {
-					Value string_val(value);
-					Value double_val = string_val.DefaultCastAs(LogicalType::DOUBLE);
-					double numeric_val = double_val.GetValue<double>();
-
-					// Check for special floating point values
-					if (std::isinf(numeric_val)) {
-						return value[0] == '-' ? "\"-Infinity\"" : "\"Infinity\"";
-					} else if (std::isnan(numeric_val)) {
-						return "\"NaN\"";
-					}
-
-					// Check if the double converts back to the same string representation
-					if (double_val.ToString() == value) {
-						return value; // It's a double, return as is
-					}
-				} catch (...) {
-					// Not a valid double, continue
+			if (value.empty() || (value[0] != '-' && (value[0] < '0' || value[0] > '9'))) {
+				return EscapeJSONString(value);
+			}
+			auto doc = yyjson_read(value.data(), value.size(), YYJSON_READ_NUMBER_AS_RAW);
+			if (doc) {
+				auto root = yyjson_doc_get_root(doc);
+				bool scalar =
+				    yyjson_is_raw(root) || yyjson_is_num(root) || yyjson_is_bool(root) || yyjson_is_null(root);
+				yyjson_doc_free(doc);
+				if (scalar) {
+					return value;
 				}
 			}
-		} catch (...) {
-			// Not a number, continue with other type detection
 		}
 
-		// Try to detect date/timestamp/time
-		std::string json_value;
-		if (TryDetectDateOrTimestamp(value, json_value)) {
-			return json_value;
+		// A sentinel in the inference document prevents quoted strings from matching SQL candidates.
+		if (inference && (node.Tag() == "!" || node.Tag() == "tag:yaml.org,2002:str")) {
+			return EscapeJSONString("yaml-string:" + value);
 		}
 
 		// If all else fails, treat as string and escape JSON special characters.
@@ -426,7 +484,7 @@ static std::string YAMLNodeToJSONImpl(const YAML::Node &node, YAMLTraversalBudge
 			if (seq_idx > 0) {
 				result += ",";
 			}
-			result += YAMLNodeToJSONImpl(node[seq_idx], budget);
+			result += YAMLNodeToJSONImpl(node[seq_idx], budget, inference);
 		}
 		result += "]";
 		return result;
@@ -443,7 +501,7 @@ static std::string YAMLNodeToJSONImpl(const YAML::Node &node, YAMLTraversalBudge
 			// Key must be a string in JSON — escape it (a key containing " or \ would otherwise
 			// produce invalid JSON; issue #42).
 			const auto key = it.first.Scalar();
-			result += EscapeJSONString(key) + ":" + YAMLNodeToJSONImpl(it.second, budget);
+			result += EscapeJSONString(key) + ":" + YAMLNodeToJSONImpl(it.second, budget, inference);
 		}
 		result += "}";
 		return result;
@@ -453,9 +511,9 @@ static std::string YAMLNodeToJSONImpl(const YAML::Node &node, YAMLTraversalBudge
 	}
 }
 
-std::string YAMLNodeToJSON(const YAML::Node &node) {
+std::string YAMLNodeToJSON(const YAML::Node &node, bool inference) {
 	YAMLTraversalBudget budget;
-	return YAMLNodeToJSONImpl(node, budget);
+	return YAMLNodeToJSONImpl(node, budget, inference);
 }
 
 //===--------------------------------------------------------------------===//

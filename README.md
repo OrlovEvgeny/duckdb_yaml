@@ -1,6 +1,25 @@
 [![DuckDB Community Extension](https://img.shields.io/badge/yaml-DuckDB_Community_Extension-blue?logo=duckdb)](https://duckdb.org/community_extensions/extensions/yaml.html)
 [![Documentation](https://img.shields.io/badge/docs-readthedocs-blue?logo=readthedocs)](https://duckdb-yaml.readthedocs.io/)
 
+## SereneDB fork
+
+This fork builds with SereneDB's DuckDB and a vendored `yaml-cpp` target.
+`read_yaml` and `parse_yaml` return one row per document by default; pass
+`expand_root_sequence=true` for the upstream root-sequence expansion behavior.
+Anchors and merge keys are expanded with the existing depth and node budgets.
+Explicit keys override merges; earlier mappings in a merge sequence win.
+
+YAML scalars use JSON-compatible resolution: plain JSON booleans and numbers
+keep their types; `no`, `yes`, sexagesimal and non-JSON numeric spellings are
+strings. yaml-cpp null spellings (`~`, `null`, `Null`, `NULL`, empty values)
+remain null. Quoted scalars and `!!str` remain JSON strings. SQL schema inference
+and value conversion use DuckDB's JSON implementation, including nested schema
+merging and JSON fallback. Temporal strings use strict casts without regional
+date-format guessing. These rules replace the upstream inference described below.
+
+`test/sql/yaml_json_compat.test` covers the fork's contract against `read_json`.
+
+
 # YAML Extension for DuckDB
 
 This extension allows DuckDB to read YAML files directly into tables and provides full YAML type support with conversion functions. It enables seamless integration of YAML data within SQL queries.

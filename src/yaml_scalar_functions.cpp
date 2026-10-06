@@ -1,3 +1,4 @@
+#include "duckdb/common/error_data.hpp"
 #include "yaml_scalar_functions.hpp"
 #include "duckdb_compat.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -117,7 +118,7 @@ static void YAMLToJSONFunction(DataChunk &args, ExpressionState &state, Vector &
 
 			return StringVector::AddString(result, json_str.c_str(), json_str.length());
 		} catch (const std::exception &e) {
-			throw InvalidInputException("Error converting YAML to JSON: %s", e.what());
+			throw InvalidInputException("Error converting YAML to JSON: %s", ErrorData(e).RawMessage());
 		}
 	});
 }
@@ -383,7 +384,7 @@ void YAMLFunctions::RegisterYAMLTypeFunctions(ExtensionLoader &loader) {
 				    // If parsing succeeds, return the input as a YAML value
 				    return StringVector::AddString(result, input_str);
 			    } catch (const YAML::Exception &e) {
-				    throw InvalidInputException("Invalid YAML: %s", e.what());
+				    throw InvalidInputException("Invalid YAML: %s", ErrorData(e).RawMessage());
 			    }
 		    });
 	    });
@@ -441,6 +442,7 @@ static void YAMLGetDefaultStyleFunction(DataChunk &args, ExpressionState &state,
 }
 
 void YAMLFunctions::RegisterStyleFunctions(ExtensionLoader &loader) {
+#ifndef YAML_DISABLE_GLOBAL_SETTERS
 	// Register default style management functions
 	auto yaml_set_default_style_fun = ScalarFunction("yaml_set_default_style", {LogicalType::VARCHAR},
 	                                                 LogicalType::VARCHAR, YAMLSetDefaultStyleFunction);
@@ -456,6 +458,8 @@ void YAMLFunctions::RegisterStyleFunctions(ExtensionLoader &loader) {
 		info.descriptions.push_back(desc);
 		loader.RegisterFunction(std::move(info));
 	}
+
+#endif
 
 	auto yaml_get_default_style_fun =
 	    ScalarFunction("yaml_get_default_style", {}, LogicalType::VARCHAR, YAMLGetDefaultStyleFunction);
@@ -531,25 +535,31 @@ static void RegisterLimitFunction(ExtensionLoader &loader, ScalarFunction fun, c
 
 void YAMLFunctions::RegisterLimitFunctions(ExtensionLoader &loader) {
 	using yaml_utils::YAMLSettings;
+#ifndef YAML_DISABLE_GLOBAL_SETTERS
 	RegisterLimitFunction(loader,
 	                      MakeLimitSetter<YAMLSettings::SetMaxExpansionNodes, YAMLSettings::GetMaxExpansionNodes>(
 	                          "yaml_set_max_expansion_nodes"),
 	                      {"limit"}, "Set the maximum number of YAML nodes created during alias/anchor expansion.",
 	                      "yaml_set_max_expansion_nodes(100000)");
+#endif
 	RegisterLimitFunction(loader, MakeLimitGetter<YAMLSettings::GetMaxExpansionNodes>("yaml_get_max_expansion_nodes"),
 	                      {}, "Get the maximum number of YAML nodes allowed during alias/anchor expansion.",
 	                      "yaml_get_max_expansion_nodes()");
+#ifndef YAML_DISABLE_GLOBAL_SETTERS
 	RegisterLimitFunction(loader,
 	                      MakeLimitSetter<YAMLSettings::SetMaxNestingDepth, YAMLSettings::GetMaxNestingDepth>(
 	                          "yaml_set_max_nesting_depth"),
 	                      {"limit"}, "Set the maximum allowed nesting depth for YAML parsing.",
 	                      "yaml_set_max_nesting_depth(1000)");
+#endif
 	RegisterLimitFunction(loader, MakeLimitGetter<YAMLSettings::GetMaxNestingDepth>("yaml_get_max_nesting_depth"), {},
 	                      "Get the maximum allowed nesting depth for YAML parsing.", "yaml_get_max_nesting_depth()");
+#ifndef YAML_DISABLE_GLOBAL_SETTERS
 	RegisterLimitFunction(
 	    loader,
 	    MakeLimitSetter<YAMLSettings::SetMaxInputSize, YAMLSettings::GetMaxInputSize>("yaml_set_max_input_size"),
 	    {"limit"}, "Set the maximum allowed byte size for a YAML document.", "yaml_set_max_input_size(10485760)");
+#endif
 	RegisterLimitFunction(loader, MakeLimitGetter<YAMLSettings::GetMaxInputSize>("yaml_get_max_input_size"), {},
 	                      "Get the maximum allowed byte size for a YAML document.", "yaml_get_max_input_size()");
 }
@@ -625,13 +635,13 @@ static void FromYAMLFunction(DataChunk &args, ExpressionState &state, Vector &re
 			// Get YAML string and parse it
 			std::string yaml_str = yaml_value.ToString();
 			yaml_utils::CheckInputSize(yaml_str.size(), "from_yaml");
-			YAML::Node node = YAML::Load(yaml_str);
+			YAML::Node node = yaml_utils::ExpandMerges(YAML::Load(yaml_str));
 
 			// Convert to the target type using existing conversion function
 			Value converted = YAMLReader::YAMLNodeToValue(node, target_type);
 			result.SetValue(row_idx, converted);
 		} catch (const std::exception &e) {
-			throw InvalidInputException("Error converting YAML to type '%s': %s", target_type.ToString(), e.what());
+			throw InvalidInputException("Error converting YAML to type '%s': %s", target_type.ToString(), ErrorData(e).RawMessage());
 		}
 	}
 }

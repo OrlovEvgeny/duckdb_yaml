@@ -10,25 +10,25 @@ PRAGMA threads=4;
 
 # Test 1: Parallel scan of 12 files (3000 rows total)
 query I
-SELECT count(*) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml');
+SELECT count(*) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true);
 ----
 3000
 
 # Test 2: Parallel aggregations
 query III
-SELECT min(id), max(id), sum(id)::BIGINT FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml');
+SELECT min(id), max(id), sum(id)::BIGINT FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true);
 ----
 1	3000	4501500
 
 # Test 3: Aggregations grouped by file_num
 query I
-SELECT count(DISTINCT file_num) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml');
+SELECT count(DISTINCT file_num) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true);
 ----
 12
 
 # Test 4: Batch order and row extraction under parallel execution
 query I
-SELECT id FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml') ORDER BY id LIMIT 5;
+SELECT id FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true) ORDER BY id LIMIT 5;
 ----
 1
 2
@@ -39,8 +39,8 @@ SELECT id FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml') ORDER BY id
 # Test 5: Self join under parallelism (verifies bind_data is not mutated during scan)
 query I
 SELECT count(*) FROM
-  read_yaml('test/yaml/stream_concurrency/file_*.yaml') a
-  JOIN read_yaml('test/yaml/stream_concurrency/file_*.yaml') b
+  read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true) a
+  JOIN read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true) b
   ON a.id = b.id;
 ----
 3000
@@ -48,7 +48,7 @@ SELECT count(*) FROM
 # Test 6: Repeated scan inside CTE
 query I
 WITH data AS (
-  SELECT * FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml')
+  SELECT * FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true)
 )
 SELECT (SELECT count(*) FROM data) + (SELECT count(*) FROM data);
 ----
@@ -57,17 +57,17 @@ SELECT (SELECT count(*) FROM data) + (SELECT count(*) FROM data);
 # Test 7: UNION ALL across parallel table functions
 query I
 SELECT count(*) FROM (
-  SELECT * FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml')
+  SELECT * FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true)
   UNION ALL
-  SELECT * FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml')
+  SELECT * FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true)
 );
 ----
 6000
 
 # Test 8: Correlated subquery re-scanning
 query II
-SELECT a.id, (SELECT count(*) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml') b WHERE b.id <= a.id)
-FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml') a
+SELECT a.id, (SELECT count(*) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true) b WHERE b.id <= a.id)
+FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true) a
 WHERE a.id <= 5
 ORDER BY a.id;
 ----
@@ -82,7 +82,7 @@ statement ok
 PRAGMA threads=8;
 
 query III
-SELECT count(*), min(id), max(id) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml');
+SELECT count(*), min(id), max(id) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true);
 ----
 3000	1	3000
 

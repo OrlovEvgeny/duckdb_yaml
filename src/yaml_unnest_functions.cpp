@@ -1,3 +1,4 @@
+#include "duckdb/common/error_data.hpp"
 #include "yaml_unnest_functions.hpp"
 #include "duckdb_compat.hpp"
 #include "yaml_types.hpp"
@@ -138,7 +139,7 @@ static void YAMLArrayLengthUnaryFunction(DataChunk &args, ExpressionState &state
 			    }
 			    return static_cast<int64_t>(node.size());
 		    } catch (const std::exception &e) {
-			    throw InvalidInputException("Error parsing YAML: %s", e.what());
+			    throw InvalidInputException("Error parsing YAML: %s", ErrorData(e).RawMessage());
 		    }
 	    });
 }
@@ -161,7 +162,7 @@ static void YAMLArrayLengthBinaryFunction(DataChunk &args, ExpressionState &stat
 			    }
 			    return static_cast<int64_t>(node.size());
 		    } catch (const std::exception &e) {
-			    throw InvalidInputException("Error in yaml_array_length: %s", e.what());
+			    throw InvalidInputException("Error in yaml_array_length: %s", ErrorData(e).RawMessage());
 		    }
 	    });
 }
@@ -212,7 +213,7 @@ static void YAMLKeysUnaryFunction(DataChunk &args, ExpressionState &state, Vecto
 			    ListVector::SetListSize(result, entry.offset + entry.length);
 			    return entry;
 		    } catch (const std::exception &e) {
-			    throw InvalidInputException("Error parsing YAML: %s", e.what());
+			    throw InvalidInputException("Error parsing YAML: %s", ErrorData(e).RawMessage());
 		    }
 	    });
 }
@@ -257,7 +258,7 @@ static void YAMLKeysBinaryFunction(DataChunk &args, ExpressionState &state, Vect
 			    ListVector::SetListSize(result, entry.offset + entry.length);
 			    return entry;
 		    } catch (const std::exception &e) {
-			    throw InvalidInputException("Error in yaml_keys: %s", e.what());
+			    throw InvalidInputException("Error in yaml_keys: %s", ErrorData(e).RawMessage());
 		    }
 	    });
 }
@@ -301,7 +302,7 @@ static unique_ptr<FunctionData> YAMLArrayElementsBind(ClientContext &context, Ta
 				result->elements.push_back(out.c_str());
 			}
 		} catch (const YAML::Exception &e) {
-			throw BinderException("Error parsing YAML: %s", e.what());
+			throw BinderException("Error parsing YAML: %s", ErrorData(e).RawMessage());
 		}
 	}
 
@@ -383,7 +384,7 @@ static unique_ptr<FunctionData> YAMLEachBind(ClientContext &context, TableFuncti
 				}
 			}
 		} catch (const YAML::Exception &e) {
-			throw BinderException("Error parsing YAML: %s", e.what());
+			throw BinderException("Error parsing YAML: %s", ErrorData(e).RawMessage());
 		}
 	}
 

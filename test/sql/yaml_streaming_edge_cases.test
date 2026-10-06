@@ -9,7 +9,7 @@ require yaml
 # ============================================================================
 
 query II
-SELECT id, name FROM read_yaml('test/yaml/stream_mixed/*.yaml') ORDER BY id;
+SELECT id, name FROM read_yaml('test/yaml/stream_mixed/*.yaml', expand_root_sequence=true) ORDER BY id;
 ----
 1	first
 2	second
@@ -23,19 +23,19 @@ SELECT id, name FROM read_yaml('test/yaml/stream_mixed/*.yaml') ORDER BY id;
 
 query IIII
 SELECT count(*), min(id), max(id), sum(id)::BIGINT
-FROM read_yaml('test/yaml/stream_edge/boundary_*.yaml');
+FROM read_yaml('test/yaml/stream_edge/boundary_*.yaml', expand_root_sequence=true);
 ----
 8194	1	8194	33574915
 
 # Verify exact row selection from the 2nd vector chunk
 query II
-SELECT id, val FROM read_yaml('test/yaml/stream_edge/boundary_*.yaml') WHERE id = 2049;
+SELECT id, val FROM read_yaml('test/yaml/stream_edge/boundary_*.yaml', expand_root_sequence=true) WHERE id = 2049;
 ----
 2049	val_2049
 
 # Verify exact row selection from the 4th vector chunk
 query II
-SELECT id, val FROM read_yaml('test/yaml/stream_edge/boundary_*.yaml') WHERE id = 4098;
+SELECT id, val FROM read_yaml('test/yaml/stream_edge/boundary_*.yaml', expand_root_sequence=true) WHERE id = 4098;
 ----
 4098	val_4098
 
@@ -45,13 +45,13 @@ SELECT id, val FROM read_yaml('test/yaml/stream_edge/boundary_*.yaml') WHERE id 
 
 # With ignore_errors=true, the oversized file is skipped and small files are read
 query I
-SELECT count(*) FROM read_yaml('test/yaml/stream_size/*.yaml', maximum_object_size=500, ignore_errors=true);
+SELECT count(*) FROM read_yaml('test/yaml/stream_size/*.yaml', expand_root_sequence=true, maximum_object_size=500, ignore_errors=true);
 ----
 2
 
 # With ignore_errors=false, reading an oversized file raises an error
 statement error
-SELECT count(*) FROM read_yaml('test/yaml/stream_size/*.yaml', maximum_object_size=500, ignore_errors=false);
+SELECT count(*) FROM read_yaml('test/yaml/stream_size/*.yaml', expand_root_sequence=true, maximum_object_size=500, ignore_errors=false);
 ----
 exceeds maximum allowed size
 
@@ -61,7 +61,7 @@ exceeds maximum allowed size
 
 # With ignore_errors=true, corrupt file is skipped and valid files are scanned
 query II
-SELECT id, status FROM read_yaml('test/yaml/stream_corrupt/*.yaml', ignore_errors=true) ORDER BY id;
+SELECT id, status FROM read_yaml('test/yaml/stream_corrupt/*.yaml', expand_root_sequence=true, ignore_errors=true) ORDER BY id;
 ----
 10	ok
 20	ok
@@ -70,7 +70,7 @@ SELECT id, status FROM read_yaml('test/yaml/stream_corrupt/*.yaml', ignore_error
 
 # With ignore_errors=false, corrupt file raises an error
 statement error
-SELECT * FROM read_yaml('test/yaml/stream_corrupt/*.yaml', ignore_errors=false);
+SELECT * FROM read_yaml('test/yaml/stream_corrupt/*.yaml', expand_root_sequence=true, ignore_errors=false);
 ----
 Error
 
@@ -80,7 +80,7 @@ Error
 
 # Sample size 5 and 1 sample file only affects schema inference; all 3000 rows are emitted
 query I
-SELECT count(*) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', sample_size=5, maximum_sample_files=1);
+SELECT count(*) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', expand_root_sequence=true, sample_size=5, maximum_sample_files=1);
 ----
 3000
 
@@ -90,14 +90,14 @@ SELECT count(*) FROM read_yaml('test/yaml/stream_concurrency/file_*.yaml', sampl
 
 query III
 SELECT count(*), min(sku), max(sku)
-FROM read_yaml('test/yaml/stream_nested_records.yaml', records='store.departments.items');
+FROM read_yaml('test/yaml/stream_nested_records.yaml', expand_root_sequence=true, records='store.departments.items');
 ----
 3000	1	3000
 
 # Aggregation over streamed records path
 query I
 SELECT round(sum(price), 2)
-FROM read_yaml('test/yaml/stream_nested_records.yaml', records='store.departments.items')
+FROM read_yaml('test/yaml/stream_nested_records.yaml', expand_root_sequence=true, records='store.departments.items')
 WHERE sku <= 10;
 ----
 82.5
@@ -107,7 +107,7 @@ WHERE sku <= 10;
 # ============================================================================
 
 query I
-SELECT id FROM read_yaml('test/yaml/stream_edge/boundary_2048.yaml') LIMIT 3;
+SELECT id FROM read_yaml('test/yaml/stream_edge/boundary_2048.yaml', expand_root_sequence=true) LIMIT 3;
 ----
 1
 2

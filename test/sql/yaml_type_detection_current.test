@@ -18,7 +18,7 @@ SELECT
     typeof(mixed_types) as mixed_type
 FROM read_yaml('test/yaml/type_detection_proper.yaml');
 ----
-TINYINT[]	DOUBLE[]	BOOLEAN[]	DATE[]	TIMESTAMP[]	TIME[]	VARCHAR[]	VARCHAR[]	VARCHAR[]
+HUGEINT[]	JSON[]	JSON[]	VARCHAR[]	VARCHAR[]	VARCHAR[]	"NULL"[]	VARCHAR[]	JSON[]
 
 # Verify integer array values - note that -123 is still within TINYINT range
 query I
@@ -30,13 +30,13 @@ SELECT integers FROM read_yaml('test/yaml/type_detection_proper.yaml');
 query I
 SELECT floats FROM read_yaml('test/yaml/type_detection_proper.yaml');
 ----
-[3.14, -2.5, 1.0, 0.0, inf, -inf]
+[3.14, -2.5, 1.0, 0.0, '"inf"', '"-inf"']
 
 # Verify boolean array values
 query I
 SELECT booleans FROM read_yaml('test/yaml/type_detection_proper.yaml');
 ----
-[true, false, true, false, true, false]
+[true, false, '"yes"', '"no"', '"on"', '"off"']
 
 # Dates are stored as VARCHAR arrays (no date detection yet)
 query I
@@ -48,4 +48,4 @@ SELECT dates FROM read_yaml('test/yaml/type_detection_proper.yaml');
 query I
 SELECT mixed_types FROM read_yaml('test/yaml/type_detection_proper.yaml');
 ----
-[1, hello, true, 3.14, NULL]
+[1, '"hello"', true, 3.14, NULL]

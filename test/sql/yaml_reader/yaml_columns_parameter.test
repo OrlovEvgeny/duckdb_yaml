@@ -7,7 +7,7 @@ require yaml
 # Test basic columns parameter with simple types
 statement ok
 CREATE TABLE explicit_types AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'name': 'VARCHAR', 'age': 'INTEGER', 'is_active': 'BOOLEAN'});
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, columns={'name': 'VARCHAR', 'age': 'INTEGER', 'is_active': 'BOOLEAN'});
 
 # Verify the column types are correctly applied
 query IIIIII
@@ -26,7 +26,7 @@ John	30	true
 # Test with different numeric types
 statement ok
 CREATE TABLE numeric_types AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'name': 'VARCHAR', 'age': 'BIGINT'});
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, columns={'name': 'VARCHAR', 'age': 'BIGINT'});
 
 query IIIIII
 DESCRIBE numeric_types;
@@ -38,7 +38,7 @@ is_active	BOOLEAN	YES	NULL	NULL	NULL
 # Test with DOUBLE type
 statement ok
 CREATE TABLE double_type AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'age': 'DOUBLE'});
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, columns={'age': 'DOUBLE'});
 
 query IIIIII
 DESCRIBE double_type;
@@ -50,7 +50,7 @@ is_active	BOOLEAN	YES	NULL	NULL	NULL
 # Test type override on sequence data
 statement ok
 CREATE TABLE array_types AS 
-SELECT * FROM read_yaml('test/yaml/sequence_basic.yaml', columns={'id': 'BIGINT', 'age': 'DOUBLE'});
+SELECT * FROM read_yaml('test/yaml/sequence_basic.yaml', expand_root_sequence=true, columns={'id': 'BIGINT', 'age': 'DOUBLE'});
 
 query IIIIII
 DESCRIBE array_types;
@@ -62,7 +62,7 @@ age	DOUBLE	YES	NULL	NULL	NULL
 # Test columns parameter overrides auto_detect
 statement ok
 CREATE TABLE override_autodetect AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', auto_detect=true, columns={'age': 'VARCHAR'});
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, auto_detect=true, columns={'age': 'VARCHAR'});
 
 # Even with auto_detect=true, age should be VARCHAR due to columns parameter
 query IIIIII
@@ -80,7 +80,7 @@ SELECT age FROM override_autodetect;
 # Test partial column specification (specified columns get explicit types, others auto-detected)
 statement ok
 CREATE TABLE partial_columns AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'age': 'BIGINT'});
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, columns={'age': 'BIGINT'});
 
 # name and is_active should be auto-detected, age should be BIGINT
 query IIIIII
@@ -93,7 +93,7 @@ is_active	BOOLEAN	YES	NULL	NULL	NULL
 # Test with multi-document YAML (multi_basic.yaml only has id and name fields)
 statement ok
 CREATE TABLE multi_doc_columns AS 
-SELECT * FROM read_yaml('test/yaml/multi_basic.yaml', multi_document=true, columns={'name': 'VARCHAR', 'id': 'BIGINT'});
+SELECT * FROM read_yaml('test/yaml/multi_basic.yaml', expand_root_sequence=true, multi_document=true, columns={'name': 'VARCHAR', 'id': 'BIGINT'});
 
 query TI
 SELECT name, id FROM multi_doc_columns ORDER BY name;
@@ -117,45 +117,32 @@ John	1
 # fails AND that the failure names the offending type -- sqllogictest matches
 # against the error, not the query, so this does not pass vacuously.
 statement error
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'name': 'INVALID_TYPE'});
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, columns={'name': 'INVALID_TYPE'});
 ----
 INVALID_TYPE
 
 # Test error cases - columns parameter is not a struct
 statement error
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns='not_a_struct');
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, columns='not_a_struct');
 ----
 columns parameter must be a struct (e.g., {name: 'VARCHAR', id: 'INTEGER'})
 
 # Test error cases - columns parameter as array instead of struct
 statement error
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns=['VARCHAR', 'INTEGER']);
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, columns=['VARCHAR', 'INTEGER']);
 ----
 columns parameter must be a struct (e.g., {name: 'VARCHAR', id: 'INTEGER'})
 
-# Test with DATE type (if supported by type detection)
-statement ok
-CREATE TABLE date_columns AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'name': 'VARCHAR', 'age': 'DATE'});
-
-query IIIIII
-DESCRIBE date_columns;
+# Numeric ages cannot be converted to temporal types.
+statement error
+SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'age': 'DATE'});
 ----
-name	VARCHAR	YES	NULL	NULL	NULL
-age	DATE	YES	NULL	NULL	NULL
-is_active	BOOLEAN	YES	NULL	NULL	NULL
+Unable to cast
 
-# Test with TIMESTAMP type
-statement ok
-CREATE TABLE timestamp_columns AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'name': 'VARCHAR', 'age': 'TIMESTAMP'});
-
-query IIIIII
-DESCRIBE timestamp_columns;
+statement error
+SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'age': 'TIMESTAMP'});
 ----
-name	VARCHAR	YES	NULL	NULL	NULL
-age	TIMESTAMP	YES	NULL	NULL	NULL
-is_active	BOOLEAN	YES	NULL	NULL	NULL
+Unable to cast
 
 # Test columns parameter with read_yaml_objects function
 statement ok
@@ -170,7 +157,7 @@ yaml	STRUCT("name" VARCHAR, age INTEGER, is_active BOOLEAN)	YES	NULL	NULL	NULL
 # Test case sensitivity in type names
 statement ok
 CREATE TABLE case_insensitive AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'name': 'varchar', 'age': 'integer'});
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, columns={'name': 'varchar', 'age': 'integer'});
 
 query IIIIII
 DESCRIBE case_insensitive;
@@ -184,12 +171,12 @@ is_active	BOOLEAN	YES	NULL	NULL	NULL
 # Test with column that doesn't exist in YAML (should be handled gracefully)
 statement ok
 CREATE TABLE nonexistent_column AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'name': 'VARCHAR', 'nonexistent': 'INTEGER'});
+SELECT * FROM read_yaml('test/yaml/simple.yaml', expand_root_sequence=true, columns={'name': 'VARCHAR', 'nonexistent': 'INTEGER'});
 
 # The nonexistent column should not appear in the result
 query IIIIII
 DESCRIBE nonexistent_column;
 ----
 name	VARCHAR	YES	NULL	NULL	NULL
-age	TINYINT	YES	NULL	NULL	NULL
+age	BIGINT	YES	NULL	NULL	NULL
 is_active	BOOLEAN	YES	NULL	NULL	NULL

@@ -1,3 +1,4 @@
+#include "duckdb/common/error_data.hpp"
 #include "yaml_types.hpp"
 #include "duckdb_compat.hpp"
 #include "yaml_utils.hpp"
@@ -120,7 +121,7 @@ static bool VarcharToYAMLCast(Vector &source, Vector &result, idx_t count, CastP
 			    //
 			    // Report it as a cast error instead: a plain CAST now raises, and TRY_CAST
 			    // yields NULL, which is what every other DuckDB type does.
-			    HandleCastError::AssignError(e.what(), parameters);
+			    HandleCastError::AssignError(ErrorData(e).RawMessage(), parameters);
 			    mask.SetInvalid(idx);
 			    success = false;
 			    return string_t();
