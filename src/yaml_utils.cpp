@@ -96,6 +96,18 @@ static void CheckExpansionBudgetImpl(const YAML::Node &node, YAMLTraversalBudget
 	}
 	YAMLBudgetScope scope(budget);
 	switch (node.Type()) {
+	case YAML::NodeType::Scalar: {
+		const auto &scalar = node.Scalar();
+		if (scalar.size() > YAML_DEFAULT_MAX_EXPANSION_BYTES - budget.bytes) {
+			throw InvalidInputException("YAML expansion exceeded the maximum byte budget (%llu).",
+			                            (unsigned long long)YAML_DEFAULT_MAX_EXPANSION_BYTES);
+		}
+		budget.bytes += scalar.size();
+		if (!simdutf::validate_utf8(scalar.data(), scalar.size())) {
+			throw YAML::ParserException(node.Mark(), "Invalid UTF-8 in YAML scalar");
+		}
+		break;
+	}
 	case YAML::NodeType::Sequence:
 		for (idx_t i = 0; i < node.size(); i++) {
 			CheckExpansionBudgetImpl(node[i], budget);
@@ -103,6 +115,7 @@ static void CheckExpansionBudgetImpl(const YAML::Node &node, YAMLTraversalBudget
 		break;
 	case YAML::NodeType::Map:
 		for (auto it = node.begin(); it != node.end(); ++it) {
+			CheckExpansionBudgetImpl(it->first, budget);
 			CheckExpansionBudgetImpl(it->second, budget);
 		}
 		break;
