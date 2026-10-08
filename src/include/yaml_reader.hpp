@@ -279,7 +279,8 @@ public:
 	 * @return vector<YAML::Node> Parsed YAML documents
 	 */
 	static vector<YAML::Node> ReadYAMLFile(ClientContext &context, const string &file_path,
-	                                       const YAMLReadOptions &options);
+	                                       const YAMLReadOptions &options,
+	                                       vector<YAML::Mark> *document_marks = nullptr);
 
 	/**
 	 * @brief Parse a multi-document YAML file with error recovery
@@ -430,6 +431,7 @@ struct YAMLReadLocalState : public LocalTableFunctionState {
 	static constexpr idx_t FILE_SHIFT = 32;
 
 	idx_t file_index = DConstants::INVALID_INDEX; // file this worker is processing / last processed
+	vector<YAML::Mark> document_marks;
 	string current_filename;    // name of that file
 	idx_t chunk_counter = 0;    // within-file index for the NEXT produced chunk
 	idx_t last_batch_index = 0; // batch index of the most recent chunk

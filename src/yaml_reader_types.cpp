@@ -90,7 +90,8 @@ Value YAMLReader::YAMLNodeToValue(const YAML::Node &node, const LogicalType &tar
 	} catch (const OutOfMemoryException &) {
 		throw;
 	} catch (const std::exception &e) {
-		throw;
+		throw InvalidInputException("line %d, column %d: %s", node.Mark().line + 1, node.Mark().column + 1,
+		                            ErrorData(e).RawMessage());
 	}
 }
 

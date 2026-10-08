@@ -147,7 +147,7 @@ vector<YAML::Node> YAMLReader::RecoverPartialYAMLDocuments(const string &yaml_co
 			// Skip empty documents or just whitespace/comments
 			string trimmed = doc_str;
 			StringUtil::Trim(trimmed);
-			if (trimmed.empty() || trimmed[0] == '#') {
+			if (trimmed.empty()) {
 				continue;
 			}
 

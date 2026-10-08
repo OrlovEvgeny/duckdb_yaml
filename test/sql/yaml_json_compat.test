@@ -167,3 +167,18 @@ SELECT * FROM parse_yaml('a: &a {self: *a}');
 ----
 nesting
 
+statement ok
+COPY (SELECT 'a: 1
+---
+a: [') TO '{TEST_DIR}/broken.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_yaml('{TEST_DIR}/broken.yaml');
+----
+<REGEX>:.*broken.yaml.*line 3, column 1.*
+
+# The execution path must also name a file excluded from schema sampling.
+statement error
+SELECT * FROM read_yaml(['{TEST_DIR}/docs.yaml', '{TEST_DIR}/broken.yaml'], maximum_sample_files=1);
+----
+<REGEX>:.*broken.yaml.*line 3, column 1.*
