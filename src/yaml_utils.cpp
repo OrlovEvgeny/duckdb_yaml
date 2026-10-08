@@ -120,6 +120,88 @@ void CheckExpansionBudget(const YAML::Node &node) {
 // YAML Parsing and Emission
 //===--------------------------------------------------------------------===//
 
+static bool IsMergeKey(const YAML::Node &key) {
+	return key.IsScalar() && key.Scalar() == "<<" && (key.Tag() == "?" || key.Tag() == "tag:yaml.org,2002:merge");
+}
+
+static YAML::Node ExpandMergesImpl(const YAML::Node &node, YAMLTraversalBudget &budget) {
+	YAMLBudgetScope scope(budget);
+	if (node.IsSequence()) {
+		for (auto child : node) {
+			YAML::Node value = child;
+			value = ExpandMergesImpl(value, budget);
+		}
+		return node;
+	}
+	if (!node.IsMap()) {
+		return node;
+	}
+	bool has_merge = false;
+	for (const auto &pair : node) {
+		if (!pair.first.IsScalar()) {
+			throw YAML::ParserException(pair.first.Mark(), pair.first.IsNull() ? "YAML mapping keys must not be null"
+			                                                                   : "YAML mapping keys must be scalars");
+		}
+		if (IsMergeKey(pair.first)) {
+			has_merge = true;
+		} else {
+			YAML::Node value = pair.second;
+			value = ExpandMergesImpl(value, budget);
+		}
+	}
+	if (!has_merge) {
+		return node;
+	}
+	YAML::Node result(YAML::NodeType::Map);
+	for (const auto &pair : node) {
+		if (!IsMergeKey(pair.first)) {
+			result.force_insert(pair.first, pair.second);
+		}
+	}
+	for (const auto &pair : node) {
+		if (!IsMergeKey(pair.first)) {
+			continue;
+		}
+		auto source = ExpandMergesImpl(pair.second, budget);
+		auto merge = [&](const YAML::Node &map) {
+			if (!map.IsMap()) {
+				throw YAML::ParserException(pair.first.Mark(), "YAML merge requires a mapping or sequence of mappings");
+			}
+			for (const auto &entry : map) {
+				const auto key = entry.first.Scalar();
+				if (!static_cast<const YAML::Node &>(result)[key]) {
+					result.force_insert(entry.first, entry.second);
+				}
+			}
+		};
+		if (source.IsSequence()) {
+			for (const auto &map : source) {
+				merge(map);
+			}
+		} else {
+			merge(source);
+		}
+	}
+	YAML::Node original = node;
+	original.remove("<<");
+	for (const auto &entry : result) {
+		if (!static_cast<const YAML::Node &>(original)[entry.first.Scalar()]) {
+			original.force_insert(entry.first, entry.second);
+		}
+	}
+	return original;
+}
+
+YAML::Node ExpandMerges(const YAML::Node &node) {
+	YAMLTraversalBudget budget;
+	try {
+		CheckExpansionBudget(node);
+		return ExpandMergesImpl(node, budget);
+	} catch (const InvalidInputException &e) {
+		throw YAML::ParserException(node.Mark(), ErrorData(e).RawMessage());
+	}
+}
+
 std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_doc) {
 	if (yaml_str.empty()) {
 		return {};
@@ -128,14 +210,18 @@ std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_doc) {
 	try {
 		std::stringstream yaml_stream(yaml_str);
 		if (multi_doc) {
-			return YAML::LoadAll(yaml_stream);
+			auto docs = YAML::LoadAll(yaml_stream);
+			for (auto &doc : docs) {
+				doc.reset(ExpandMerges(doc));
+			}
+			return docs;
 		} else {
 			std::vector<YAML::Node> result;
-			result.push_back(YAML::Load(yaml_stream));
+			result.push_back(ExpandMerges(YAML::Load(yaml_stream)));
 			return result;
 		}
 	} catch (const std::exception &e) {
-		throw InvalidInputException("Error parsing YAML: %s", e.what());
+		throw InvalidInputException("Error parsing YAML: %s", ErrorData(e).RawMessage());
 	}
 }
 

@@ -1,4 +1,5 @@
 #include "yaml_reader.hpp"
+#include "yaml_utils.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/enums/file_glob_options.hpp"
@@ -279,6 +280,9 @@ vector<YAML::Node> YAMLReader::ReadYAMLFile(ClientContext &context, const string
 		}
 	}
 
+	for (auto &doc : docs) {
+		doc.reset(yaml_utils::ExpandMerges(doc));
+	}
 	return docs;
 }
 

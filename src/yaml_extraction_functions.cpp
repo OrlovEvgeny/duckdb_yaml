@@ -165,7 +165,7 @@ static void YAMLTypeBinaryFunction(DataChunk &args, ExpressionState &state, Vect
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 
@@ -212,7 +212,7 @@ static void YAMLExtractFunction(DataChunk &args, ExpressionState &state, Vector 
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 
@@ -249,7 +249,7 @@ static void YAMLExtractStringFunction(DataChunk &args, ExpressionState &state, V
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 
@@ -294,7 +294,7 @@ static void YAMLExistsFunction(DataChunk &args, ExpressionState &state, Vector &
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 
@@ -469,8 +469,7 @@ static void YAMLStructureFunction(DataChunk &args, ExpressionState &state, Vecto
 
 		try {
 			yaml_utils::CheckInputSize(yaml_str.GetSize(), "yaml_structure");
-			YAML::Node root = YAML::Load(yaml_str.GetString());
-			yaml_utils::CheckExpansionBudget(root);
+			YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			string structure = BuildYAMLStructure(root);
 			return StringVector::AddString(result, structure);
 		} catch (const std::exception &e) {
@@ -659,7 +658,7 @@ static void YAMLValueFunction(DataChunk &args, ExpressionState &state, Vector &r
 		    }
 
 		    try {
-			    YAML::Node root = YAML::Load(yaml_str.GetString());
+			    YAML::Node root = yaml_utils::ExpandMerges(YAML::Load(yaml_str.GetString()));
 			    auto path_components = ParseYAMLPath(path_str.GetString());
 			    auto node = ExtractFromYAML(root, path_components);
 

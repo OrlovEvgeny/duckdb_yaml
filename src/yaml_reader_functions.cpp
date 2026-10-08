@@ -538,53 +538,7 @@ void YAMLReader::YAMLReadRowsFunction(ClientContext &context, TableFunctionInput
 
 		try {
 			if (!lstate.file_loaded) {
-				auto file_handle = fs.OpenFile(filename, FileFlags::FILE_FLAGS_READ);
-				auto file_size = fs.GetFileSize(*file_handle);
-
-				if (file_size > bind_data.options.maximum_object_size) {
-					if (!bind_data.options.ignore_errors) {
-						throw IOException("YAML file size (" + to_string(file_size) +
-						                  " bytes) exceeds maximum allowed size (" +
-						                  to_string(bind_data.options.maximum_object_size) + " bytes)");
-					}
-					// Skip file with ignore_errors
-					lstate.ResetFileResources();
-					lstate.have_file = false;
-					continue;
-				}
-
-				string content(file_size, ' ');
-				fs.Read(*file_handle, const_cast<char *>(content.c_str()), file_size);
-
-				if (bind_data.options.strip_document_suffixes) {
-					content = StripDocumentSuffixes(content);
-				}
-
-				vector<YAML::Node> docs;
-				if (bind_data.options.multi_document_mode != MultiDocumentMode::FIRST) {
-					try {
-						std::stringstream yaml_stream(content);
-						docs = YAML::LoadAll(yaml_stream);
-					} catch (const YAML::Exception &e) {
-						if (!bind_data.options.ignore_errors) {
-							throw IOException("Error parsing multi-document YAML file: " + string(e.what()));
-						}
-						docs = RecoverPartialYAMLDocuments(content);
-					}
-				} else {
-					try {
-						YAML::Node yaml_node = YAML::Load(content);
-						docs.push_back(yaml_node);
-					} catch (const YAML::Exception &e) {
-						if (!bind_data.options.ignore_errors) {
-							throw IOException("Error parsing YAML file: " + string(e.what()));
-						}
-						auto recovered = RecoverPartialYAMLDocuments(content);
-						if (!recovered.empty()) {
-							docs = recovered;
-						}
-					}
-				}
+				auto docs = ReadYAMLFile(context, filename, bind_data.options);
 
 				if (bind_data.options.multi_document_mode == MultiDocumentMode::FRONTMATTER) {
 					if (docs.size() < 2) {
@@ -780,52 +734,7 @@ void YAMLReader::YAMLReadObjectsFunction(ClientContext &context, TableFunctionIn
 
 		try {
 			if (!lstate.file_loaded) {
-				auto file_handle = fs.OpenFile(filename, FileFlags::FILE_FLAGS_READ);
-				auto file_size = fs.GetFileSize(*file_handle);
-
-				if (file_size > bind_data.options.maximum_object_size) {
-					if (!bind_data.options.ignore_errors) {
-						throw IOException("YAML file size (" + to_string(file_size) +
-						                  " bytes) exceeds maximum allowed size (" +
-						                  to_string(bind_data.options.maximum_object_size) + " bytes)");
-					}
-					lstate.ResetFileResources();
-					lstate.have_file = false;
-					continue;
-				}
-
-				string content(file_size, ' ');
-				fs.Read(*file_handle, const_cast<char *>(content.c_str()), file_size);
-
-				if (bind_data.options.strip_document_suffixes) {
-					content = StripDocumentSuffixes(content);
-				}
-
-				vector<YAML::Node> docs;
-				if (bind_data.options.multi_document_mode != MultiDocumentMode::FIRST) {
-					try {
-						std::stringstream yaml_stream(content);
-						docs = YAML::LoadAll(yaml_stream);
-					} catch (const YAML::Exception &e) {
-						if (!bind_data.options.ignore_errors) {
-							throw IOException("Error parsing multi-document YAML file: " + string(e.what()));
-						}
-						docs = RecoverPartialYAMLDocuments(content);
-					}
-				} else {
-					try {
-						YAML::Node yaml_node = YAML::Load(content);
-						docs.push_back(yaml_node);
-					} catch (const YAML::Exception &e) {
-						if (!bind_data.options.ignore_errors) {
-							throw IOException("Error parsing YAML file: " + string(e.what()));
-						}
-						auto recovered = RecoverPartialYAMLDocuments(content);
-						if (!recovered.empty()) {
-							docs = recovered;
-						}
-					}
-				}
+				auto docs = ReadYAMLFile(context, filename, bind_data.options);
 
 				lstate.file_nodes = std::move(docs);
 				lstate.current_row_index = 0;
@@ -969,6 +878,10 @@ unique_ptr<FunctionData> YAMLReader::ParseYAMLBind(ClientContext &context, Table
 			docs = YAML::LoadAll(ss);
 		} else {
 			docs.push_back(YAML::Load(yaml_str));
+		}
+
+		for (auto &doc : docs) {
+			doc.reset(yaml_utils::ExpandMerges(doc));
 		}
 
 		// Extract row nodes (expand sequences if needed)

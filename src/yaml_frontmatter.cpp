@@ -222,7 +222,7 @@ static unique_ptr<FunctionData> YAMLFrontmatterBind(ClientContext &context, Tabl
 		for (const auto &file_path : result->file_paths) {
 			try {
 				auto extracted = ExtractFrontmatter(ReadFileContent(context, file_path));
-				auto node = YAML::Load(extracted.first);
+				auto node = yaml_utils::ExpandMerges(YAML::Load(extracted.first));
 				if (node.IsMap()) {
 					sample_nodes.push_back(node);
 				}
@@ -313,7 +313,7 @@ static void YAMLFrontmatterFunction(ClientContext &context, TableFunctionInput &
 			if (!bind_data.options.as_yaml_objects) {
 				// Default: parse frontmatter and extract fields as columns
 				try {
-					YAML::Node node = YAML::Load(frontmatter);
+					YAML::Node node = yaml_utils::ExpandMerges(YAML::Load(frontmatter));
 
 					if (node.IsMap()) {
 						// Process each column (skip filename if present)

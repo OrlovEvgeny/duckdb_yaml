@@ -136,3 +136,34 @@ SELECT count(*) FROM parse_yaml('---
 ----
 2
 
+query III
+SELECT target.a, target.b, target.c FROM parse_yaml('first: &a {a: 1, b: 2}
+second: &b {a: 9, c: 3}
+target:
+  <<: [*a, *b]
+  b: 7');
+----
+1	7	3
+
+query II
+SELECT target.a, target.b FROM parse_yaml('base: &base {a: 1}
+mid: &mid {<<: *base, b: 2}
+target: {<<: *mid}');
+----
+1	2
+
+query T
+SELECT yaml_to_json('"<<": literal');
+----
+{"<<":"literal"}
+
+statement error
+SELECT * FROM parse_yaml('a: {<<: 42}');
+----
+merge requires a mapping
+
+statement error
+SELECT * FROM parse_yaml('a: &a {self: *a}');
+----
+nesting
+

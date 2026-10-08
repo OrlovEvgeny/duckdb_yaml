@@ -135,6 +135,8 @@ std::string EmitYAML(const YAML::Node &node, YAMLFormat format, YAMLStringStyle 
 // Emit multiple YAML documents
 std::string EmitYAMLMultiDoc(const std::vector<YAML::Node> &docs, YAMLFormat format);
 
+YAML::Node ExpandMerges(const YAML::Node &node);
+
 // Parse YAML string (supports multi-document)
 std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_document = true);
 

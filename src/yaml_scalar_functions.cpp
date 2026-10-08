@@ -634,7 +634,7 @@ static void FromYAMLFunction(DataChunk &args, ExpressionState &state, Vector &re
 			// Get YAML string and parse it
 			std::string yaml_str = yaml_value.ToString();
 			yaml_utils::CheckInputSize(yaml_str.size(), "from_yaml");
-			YAML::Node node = YAML::Load(yaml_str);
+			YAML::Node node = yaml_utils::ExpandMerges(YAML::Load(yaml_str));
 
 			// Convert to the target type using existing conversion function
 			Value converted = YAMLReader::YAMLNodeToValue(node, target_type);
