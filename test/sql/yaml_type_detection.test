@@ -10,7 +10,7 @@ require json
 query III
 SELECT typeof(integer) as int_type, typeof(float) as float_type, typeof(boolean_true) as bool_type FROM read_yaml('test/yaml/simple_types.yaml');
 ----
-TINYINT	DOUBLE	BOOLEAN
+BIGINT	DOUBLE	BOOLEAN
 
 # Test integer values
 query I
@@ -62,12 +62,12 @@ SELECT * FROM read_yaml('test/yaml/type_detection_proper.yaml');
 query III
 SELECT booleans[1], booleans[3], booleans[5] FROM type_test;
 ----
-true	true	true
+true	"yes"	"on"
 
 query III
 SELECT booleans[2], booleans[4], booleans[6] FROM type_test;
 ----
-false	false	false
+false	"no"	"off"
 
 # Test that numbers are properly detected in arrays
 query IIR
@@ -79,4 +79,4 @@ SELECT integers[1], integers[2], floats[1] FROM type_test;
 query I
 SELECT typeof(floats) FROM type_test;
 ----
-DOUBLE[]
+JSON[]

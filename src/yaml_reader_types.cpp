@@ -1,488 +1,98 @@
+#include "duckdb/common/error_data.hpp"
 #include "yaml_reader.hpp"
-#include "yaml_types.hpp"
 #include "yaml_utils.hpp"
-#include "duckdb_compat.hpp"
-#include "duckdb/common/types/date.hpp"
-#include "duckdb/common/types/timestamp.hpp"
-#include "duckdb/common/types/time.hpp"
-#include "duckdb/common/types.hpp"
-#include <algorithm>
-#include <cctype>
-#include <cmath>
-#include <limits>
+#include "json_structure.hpp"
+#include "json_scan.hpp"
+#include "json_transform.hpp"
+#include "duckdb/storage/arena_allocator.hpp"
+#include "yyjson_memory.hpp"
 
 namespace duckdb {
 
-// YAML Type Conversions
-// Helper function to detect YAML type.
-// Budget-carrying worker: bounds recursion depth and total node expansion so
-// deeply-nested or alias-bombed input fails with a clean error instead of a
-// stack overflow / exponential blow-up (GHSA-h5hw-g5m6-vmjj).
-static LogicalType DetectYAMLTypeImpl(const YAML::Node &node, yaml_utils::YAMLTraversalBudget &budget) {
-	if (!node) {
-		return LogicalType::VARCHAR;
-	}
-	yaml_utils::YAMLBudgetScope scope(budget);
+using YAMLJSONDocument = std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)>;
 
-	switch (node.Type()) {
-	case YAML::NodeType::Scalar: {
-		std::string scalar_value = node.Scalar();
-
-		// Check for null values
-		if (scalar_value == "null" || scalar_value == "~" || scalar_value.empty()) {
-			return LogicalType::VARCHAR; // Will be NULL in the actual data
-		}
-
-		// Check for boolean values (case-insensitive)
-		std::string lower_value = scalar_value;
-		std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(), ::tolower);
-
-		if (lower_value == "true" || lower_value == "false" || lower_value == "yes" || lower_value == "no" ||
-		    lower_value == "on" || lower_value == "off" || lower_value == "y" || lower_value == "n" ||
-		    lower_value == "t" || lower_value == "f") {
-			return LogicalType::BOOLEAN;
-		}
-
-		// Skip numeric detection for values that might be dates/times
-		bool might_be_temporal = false;
-		if (scalar_value.find('-') != std::string::npos || scalar_value.find(':') != std::string::npos ||
-		    scalar_value.find('T') != std::string::npos) {
-			// Don't skip potential negative numbers - only temporal if it's not just a negative sign
-			might_be_temporal =
-			    (scalar_value.find(':') != std::string::npos || scalar_value.find('T') != std::string::npos) ||
-			    (scalar_value.find('-') != std::string::npos && scalar_value[0] != '-');
-
-			if (might_be_temporal) {
-				// Try to parse as date
-				idx_t pos = 0;
-				date_t date_result;
-				bool special = false;
-				auto date_cast_result =
-				    Date::TryConvertDate(scalar_value.c_str(), scalar_value.length(), pos, date_result, special, false);
-				if (date_cast_result == DateCastResult::SUCCESS && pos == scalar_value.length()) {
-					return LogicalType::DATE;
-				}
-
-				// Try to parse as timestamp
-				timestamp_t timestamp_result;
-				if (Timestamp::TryConvertTimestamp(scalar_value.c_str(), scalar_value.length(), timestamp_result,
-				                                   false) == TimestampCastResult::SUCCESS) {
-					return LogicalType::TIMESTAMP;
-				}
-
-				// Try to parse as time
-				pos = 0;
-				dtime_t time_result;
-				if (Time::TryConvertTime(scalar_value.c_str(), scalar_value.length(), pos, time_result, false) &&
-				    pos == scalar_value.length()) {
-					return LogicalType::TIME;
-				}
-			}
-		}
-
-		if (!might_be_temporal) {
-			// Check for special floating point values first
-			if (lower_value == "inf" || lower_value == "infinity") {
-				return LogicalType::DOUBLE;
-			} else if (lower_value == "-inf" || lower_value == "-infinity") {
-				return LogicalType::DOUBLE;
-			} else if (lower_value == "nan") {
-				return LogicalType::DOUBLE;
-			}
-
-			try {
-				// Try integer
-				size_t pos;
-				int64_t int_val = std::stoll(scalar_value, &pos);
-				if (pos == scalar_value.size()) {
-					// Choose appropriate integer type based on value
-					if (int_val >= -128 && int_val <= 127) {
-						return LogicalType::TINYINT;
-					} else if (int_val >= -32768 && int_val <= 32767) {
-						return LogicalType::SMALLINT;
-					} else if (int_val >= -2147483648LL && int_val <= 2147483647LL) {
-						return LogicalType::INTEGER;
-					} else {
-						return LogicalType::BIGINT;
-					}
-				}
-
-				// Try double
-				double double_val = std::stod(scalar_value, &pos);
-				if (pos == scalar_value.size()) {
-					// Check for special floating point values
-					if (std::isinf(double_val) || std::isnan(double_val)) {
-						return LogicalType::DOUBLE;
-					}
-					// Check if it's a whole number that was written with decimal point
-					if (double_val == std::floor(double_val) && double_val >= std::numeric_limits<int64_t>::min() &&
-					    double_val <= std::numeric_limits<int64_t>::max()) {
-						// It's a whole number, use integer type
-						return DetectYAMLTypeImpl(YAML::Node(std::to_string(static_cast<int64_t>(double_val))), budget);
-					}
-					return LogicalType::DOUBLE;
-				}
-			} catch (...) {
-				// Not a number
-			}
-		}
-		return LogicalType::VARCHAR;
-	}
-	case YAML::NodeType::Sequence: {
-		if (node.size() == 0) {
-			return LogicalType::LIST(LogicalType::VARCHAR);
-		}
-
-		// For mixed-type sequences, we need to check all elements to determine the common type
-		LogicalType common_type = LogicalType::VARCHAR;
-		bool first_element = true;
-
-		for (size_t idx = 0; idx < node.size(); idx++) {
-			LogicalType element_type = DetectYAMLTypeImpl(node[idx], budget);
-
-			if (first_element) {
-				common_type = element_type;
-				first_element = false;
-			} else if (common_type.id() == element_type.id()) {
-				// If both are structs, merge their fields to handle optional fields
-				if (common_type.id() == LogicalTypeId::STRUCT) {
-					common_type = YAMLReader::MergeStructTypes(common_type, element_type);
-				}
-				// If both are lists, recursively merge the child types
-				else if (common_type.id() == LogicalTypeId::LIST) {
-					auto common_child = ListType::GetChildType(common_type);
-					auto element_child = ListType::GetChildType(element_type);
-					if (common_child.id() == LogicalTypeId::STRUCT && element_child.id() == LogicalTypeId::STRUCT) {
-						common_type = LogicalType::LIST(YAMLReader::MergeStructTypes(common_child, element_child));
-					}
-				}
-				continue; // Keep checking
-			} else if ((common_type.HasAlias() && common_type.GetAlias() == "yaml" &&
-			            element_type.id() == LogicalTypeId::STRUCT) ||
-			           (element_type.HasAlias() && element_type.GetAlias() == "yaml" &&
-			            common_type.id() == LogicalTypeId::STRUCT)) {
-				// Handle empty maps (yaml type) mixed with structs (issue #33)
-				// Empty maps can be converted to empty struct values, so use the struct type
-				if (common_type.id() == LogicalTypeId::STRUCT) {
-					// common_type is already STRUCT, keep it
-					continue;
-				} else {
-					// element_type is STRUCT, use it
-					common_type = element_type;
-					continue;
-				}
-			} else if (common_type.IsNumeric() && element_type.IsNumeric()) {
-				// Combine numeric types - promote to the wider type
-				// First check if either is DOUBLE
-				if (common_type.id() == LogicalTypeId::DOUBLE || element_type.id() == LogicalTypeId::DOUBLE) {
-					common_type = LogicalType::DOUBLE;
-				}
-				// Then check integer types in order of size
-				else if (common_type.id() == LogicalTypeId::BIGINT || element_type.id() == LogicalTypeId::BIGINT) {
-					common_type = LogicalType::BIGINT;
-				} else if (common_type.id() == LogicalTypeId::INTEGER || element_type.id() == LogicalTypeId::INTEGER) {
-					common_type = LogicalType::INTEGER;
-				} else if (common_type.id() == LogicalTypeId::SMALLINT ||
-				           element_type.id() == LogicalTypeId::SMALLINT) {
-					common_type = LogicalType::SMALLINT;
-				}
-				// If both are TINYINT, keep TINYINT
-			} else {
-				common_type = LogicalType::VARCHAR;
-				break; // No need to check further once we've fallen back to VARCHAR
-			}
-		}
-
-		return LogicalType::LIST(common_type);
-	}
-	case YAML::NodeType::Map: {
-		child_list_t<LogicalType> struct_children;
-		for (auto it = node.begin(); it != node.end(); ++it) {
-			std::string key = it->first.Scalar();
-			LogicalType value_type = DetectYAMLTypeImpl(it->second, budget);
-			struct_children.push_back(make_pair(CompatMakeIdentifier(key), value_type));
-		}
-		// Empty maps create STRUCT() with no children, which DuckDB cannot cast
-		// Return YAML type for empty maps to preserve them as opaque values (issue #33)
-		// Note: MergeStructTypes handles empty structs when merging with non-empty ones
-		if (struct_children.empty()) {
-			return YAMLTypes::YAMLType();
-		}
-		return LogicalType::STRUCT(struct_children);
-	}
-	default:
-		return LogicalType::VARCHAR;
-	}
+static YAMLJSONDocument ReadJSONNode(const YAML::Node &node, JSONAllocator &allocator, yyjson_read_flag flags,
+                                     bool inference = false) {
+	auto json = yaml_utils::YAMLNodeToJSON(node, inference);
+	return YAMLJSONDocument(JSONCommon::ReadDocument(json.data(), json.size(), flags, allocator.GetYYAlc()),
+	                        yyjson_doc_free);
 }
 
-LogicalType YAMLReader::DetectYAMLType(const YAML::Node &node) {
-	yaml_utils::YAMLTraversalBudget budget;
-	return DetectYAMLTypeImpl(node, budget);
+LogicalType YAMLReader::DetectYAMLType(ClientContext &context, const YAML::Node &node) {
+	return DetectJaggedYAMLType(context, {node});
 }
 
-// Helper function to detect YAML type across multiple documents with jagged schema support
-// Uses MergeStructTypes to recursively merge nested struct fields from all documents
-LogicalType YAMLReader::DetectJaggedYAMLType(const vector<YAML::Node> &nodes) {
-	if (nodes.empty()) {
-		return LogicalType::VARCHAR;
-	}
-
-	// Use first node as base type
-	LogicalType merged_type = DetectYAMLType(nodes[0]);
-
-	// Merge types from all subsequent documents
-	for (size_t i = 1; i < nodes.size(); i++) {
-		LogicalType node_type = DetectYAMLType(nodes[i]);
-
-		// If both are structs, merge them recursively
-		if (merged_type.id() == LogicalTypeId::STRUCT && node_type.id() == LogicalTypeId::STRUCT) {
-			merged_type = MergeStructTypes(merged_type, node_type);
-		} else if ((merged_type.HasAlias() && merged_type.GetAlias() == "yaml" &&
-		            node_type.id() == LogicalTypeId::STRUCT) ||
-		           (node_type.HasAlias() && node_type.GetAlias() == "yaml" &&
-		            merged_type.id() == LogicalTypeId::STRUCT)) {
-			// Handle empty maps (yaml type) mixed with structs (issue #33)
-			// Empty maps can be converted to empty struct values, so use the struct type
-			if (merged_type.id() == LogicalTypeId::STRUCT) {
-				// merged_type is already STRUCT, keep it
-			} else {
-				// node_type is STRUCT, use it
-				merged_type = node_type;
-			}
-		} else if (merged_type.id() != node_type.id()) {
-			// Different scalar types across nodes - widen compatible numerics (TINYINT + SMALLINT
-			// -> SMALLINT, INT + DOUBLE -> DOUBLE); keep the VARCHAR fallback for genuinely
-			// incompatible pairs (issue #42).
-			if (merged_type.IsNumeric() && node_type.IsNumeric()) {
-				merged_type = YAMLReader::WidenConflictingScalarTypes(merged_type, node_type);
-			} else {
-				merged_type = LogicalType::VARCHAR;
-			}
-		}
-	}
-
-	return merged_type;
-}
-
-// Helper function to convert YAML node to DuckDB value.
-// Budget-carrying worker (see DetectYAMLTypeImpl) — bounds recursion depth and
-// total node expansion so alias-bombed / deeply-nested input fails cleanly.
-static Value YAMLNodeToValueImpl(const YAML::Node &node, const LogicalType &target_type,
-                                 yaml_utils::YAMLTraversalBudget &budget) {
-	if (!node) {
-		return Value(target_type); // NULL value
-	}
-	yaml_utils::YAMLBudgetScope scope(budget);
-
-	// Handle JSON type conversion - applies to all node types
-	if ((target_type.HasAlias() && target_type.GetAlias() == "json") || target_type.ToString() == "JSON") {
-		// First convert YAML node to YAML string, then use the same path as yaml_to_json function
-		YAML::Emitter out;
-		yaml_utils::ConfigureEmitter(out, yaml_utils::YAMLFormat::BLOCK);
-		out << node;
-		std::string yaml_str = out.c_str();
-
-		// Now parse and convert to JSON using the same logic as yaml_to_json
+static unique_ptr<JSONStructureNode> DetectYAMLStructure(ClientContext &context, const vector<YAML::Node> &nodes,
+                                                         const vector<string> &sources) {
+	JSONReaderOptions options;
+	auto structure = make_uniq<JSONStructureNode>();
+	ArenaAllocator allocator(Allocator::Get(context));
+	Vector strings(LogicalType::VARCHAR);
+	JSONScanData scan;
+	scan.InitializeFormats(true);
+	MutableDateFormatMap mutable_formats(*scan.date_format_map);
+	for (idx_t i = 0; i < nodes.size(); i++) {
+		const auto &node = nodes[i];
 		try {
-			const auto docs = yaml_utils::ParseYAML(yaml_str, true);
-			std::string json_str;
-			if (docs.empty()) {
-				json_str = "null";
-			} else if (docs.size() == 1) {
-				json_str = yaml_utils::YAMLNodeToJSON(docs[0]);
-			} else {
-				json_str = "[";
-				for (idx_t doc_idx = 0; doc_idx < docs.size(); doc_idx++) {
-					if (doc_idx > 0) {
-						json_str += ",";
-					}
-					json_str += yaml_utils::YAMLNodeToJSON(docs[doc_idx]);
-				}
-				json_str += "]";
+			JSONAllocator json_allocator(Allocator::Get(context));
+			auto doc = ReadJSONNode(node, json_allocator, JSONCommon::READ_FLAG, true);
+			auto value = yyjson_doc_get_root(doc.get());
+			JSONStructure::ExtractStructure(value, *structure, false, false);
+			if (structure->ContainsVarchar()) {
+				structure->InitializeCandidateTypes(options.max_depth, options.convert_strings_to_integers);
+				structure->RefineCandidateTypes(&value, 1, strings, allocator, mutable_formats);
 			}
-			return Value(json_str);
+		} catch (const OutOfMemoryException &) {
+			throw;
 		} catch (const std::exception &e) {
-			return Value(target_type); // Return NULL on error
+			throw IOException("YAML source '%s', line %d, column %d: %s", i < sources.size() ? sources[i] : "<input>",
+			                  node.Mark().line + 1, node.Mark().column + 1, ErrorData(e).RawMessage());
 		}
+		allocator.Reset();
 	}
-
-	// Handle YAML type conversion - applies to all node types
-	if (target_type.HasAlias() && target_type.GetAlias() == "yaml") {
-		// Emit as YAML string
-		YAML::Emitter out;
-		yaml_utils::ConfigureEmitter(out, yaml_utils::YAMLFormat::FLOW);
-		out << node;
-		return Value(out.c_str());
-	}
-
-	// Handle based on YAML node type
-	switch (node.Type()) {
-	case YAML::NodeType::Scalar: {
-		std::string scalar_value = node.Scalar();
-
-		if (target_type.id() == LogicalTypeId::VARCHAR) {
-			return Value(scalar_value);
-		} else if (target_type.id() == LogicalTypeId::BOOLEAN) {
-			// Handle case-insensitive boolean values
-			std::string lower_value = scalar_value;
-			std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(), ::tolower);
-
-			if (lower_value == "true" || lower_value == "yes" || lower_value == "on" || lower_value == "y" ||
-			    lower_value == "t") {
-				return Value::BOOLEAN(true);
-			} else if (lower_value == "false" || lower_value == "no" || lower_value == "off" || lower_value == "n" ||
-			           lower_value == "f") {
-				return Value::BOOLEAN(false);
-			}
-			return Value(target_type); // NULL if not valid boolean
-		} else if (target_type.id() == LogicalTypeId::TINYINT) {
-			try {
-				int64_t val = std::stoll(scalar_value);
-				if (val >= -128 && val <= 127) {
-					return Value::TINYINT(static_cast<int8_t>(val));
-				}
-				return Value(target_type); // NULL if out of range
-			} catch (...) {
-				return Value(target_type); // NULL if conversion fails
-			}
-		} else if (target_type.id() == LogicalTypeId::SMALLINT) {
-			try {
-				int64_t val = std::stoll(scalar_value);
-				if (val >= -32768 && val <= 32767) {
-					return Value::SMALLINT(static_cast<int16_t>(val));
-				}
-				return Value(target_type); // NULL if out of range
-			} catch (...) {
-				return Value(target_type); // NULL if conversion fails
-			}
-		} else if (target_type.id() == LogicalTypeId::INTEGER) {
-			try {
-				int64_t val = std::stoll(scalar_value);
-				if (val >= -2147483648LL && val <= 2147483647LL) {
-					return Value::INTEGER(static_cast<int32_t>(val));
-				}
-				return Value(target_type); // NULL if out of range
-			} catch (...) {
-				return Value(target_type); // NULL if conversion fails
-			}
-		} else if (target_type.id() == LogicalTypeId::BIGINT) {
-			try {
-				return Value::BIGINT(std::stoll(scalar_value));
-			} catch (...) {
-				return Value(target_type); // NULL if conversion fails
-			}
-		} else if (target_type.id() == LogicalTypeId::DOUBLE) {
-			// Handle special floating point values
-			std::string lower_val = scalar_value;
-			std::transform(lower_val.begin(), lower_val.end(), lower_val.begin(), ::tolower);
-
-			if (lower_val == "inf" || lower_val == "infinity") {
-				return Value::DOUBLE(std::numeric_limits<double>::infinity());
-			} else if (lower_val == "-inf" || lower_val == "-infinity") {
-				return Value::DOUBLE(-std::numeric_limits<double>::infinity());
-			} else if (lower_val == "nan") {
-				return Value::DOUBLE(std::numeric_limits<double>::quiet_NaN());
-			}
-
-			try {
-				double val = std::stod(scalar_value);
-				return Value::DOUBLE(val);
-			} catch (...) {
-				return Value(target_type); // NULL if conversion fails
-			}
-		} else if (target_type.id() == LogicalTypeId::DATE) {
-			idx_t pos = 0;
-			date_t date_result;
-			bool special = false;
-			auto date_cast_result =
-			    Date::TryConvertDate(scalar_value.c_str(), scalar_value.length(), pos, date_result, special, false);
-			if (date_cast_result == DateCastResult::SUCCESS && pos == scalar_value.length()) {
-				return Value::DATE(date_result);
-			}
-			return Value(target_type); // NULL if conversion fails
-		} else if (target_type.id() == LogicalTypeId::TIMESTAMP) {
-			timestamp_t timestamp_result;
-			if (Timestamp::TryConvertTimestamp(scalar_value.c_str(), scalar_value.length(), timestamp_result, false) ==
-			    TimestampCastResult::SUCCESS) {
-				return Value::TIMESTAMP(timestamp_result);
-			}
-			return Value(target_type); // NULL if conversion fails
-		} else if (target_type.id() == LogicalTypeId::TIME) {
-			idx_t pos = 0;
-			dtime_t time_result;
-			if (Time::TryConvertTime(scalar_value.c_str(), scalar_value.length(), pos, time_result, false) &&
-			    pos == scalar_value.length()) {
-				return Value::TIME(time_result);
-			}
-			return Value(target_type); // NULL if conversion fails
-		}
-		// If target type is STRUCT or LIST but we have a scalar, return NULL
-		// This handles type mismatches where schema detection saw a different type
-		if (target_type.id() == LogicalTypeId::STRUCT || target_type.id() == LogicalTypeId::LIST) {
-			return Value(target_type); // NULL for type mismatch
-		}
-		return Value(scalar_value); // Default to string
-	}
-	case YAML::NodeType::Sequence: {
-		if (target_type.id() != LogicalTypeId::LIST) {
-			return Value(target_type); // NULL if not expecting a list
-		}
-		// Get child type for list (used by both the empty-list and non-empty branches).
-		auto child_type = ListType::GetChildType(target_type);
-		if (node.size() == 0) {
-			// Empty lists need an explicit element type — pass the CHILD type, not
-			// `target_type` (which is the whole LIST<child>). Previously this passed
-			// `target_type`, producing a Value with type LIST<LIST<child>> that
-			// poisoned outer struct unification (issue #37) when the first row of a
-			// struct-array field had an empty list and a later row had data:
-			//
-			//   data_models: []                  -> LIST<LIST<VARCHAR>>  (bug)
-			//   data_models: [OVR-DM-001]        -> LIST<VARCHAR>        (correct)
-			//
-			// Unification then tried to cast the second row's VARCHAR element to
-			// LIST<VARCHAR> and failed with the misleading "Failed to cast value:
-			// Type VARCHAR ... can't be cast to the destination type VARCHAR[]"
-			// error from the bug report. The fix is to use child_type uniformly.
-			return Value::LIST(child_type, {});
-		}
-
-		// Create list of values - recursively convert each element
-		vector<Value> values;
-		for (size_t idx = 0; idx < node.size(); idx++) {
-			values.push_back(YAMLNodeToValueImpl(node[idx], child_type, budget));
-		}
-
-		return Value::LIST(values);
-	}
-	case YAML::NodeType::Map: {
-		if (target_type.id() != LogicalTypeId::STRUCT) {
-			return Value(target_type); // NULL if not expecting a struct
-		}
-
-		// Get struct children
-		auto &struct_children = StructType::GetChildTypes(target_type);
-
-		// Create struct values
-		child_list_t<Value> struct_values;
-		for (auto &entry : struct_children) {
-			auto entry_name = CompatIdentifierName(entry.first);
-			if (node[entry_name]) {
-				struct_values.push_back(make_pair(entry.first, YAMLNodeToValueImpl(node[entry_name], entry.second, budget)));
-			} else {
-				struct_values.push_back(make_pair(entry.first, Value(entry.second))); // NULL value
-			}
-		}
-
-		return Value::STRUCT(struct_values);
-	}
-	default:
-		return Value(target_type); // NULL for unknown type
-	}
+	return structure;
 }
 
-Value YAMLReader::YAMLNodeToValue(const YAML::Node &node, const LogicalType &target_type) {
-	yaml_utils::YAMLTraversalBudget budget;
-	return YAMLNodeToValueImpl(node, target_type, budget);
+LogicalType YAMLReader::DetectJaggedYAMLType(ClientContext &context, const vector<YAML::Node> &nodes,
+                                             const vector<string> &sources) {
+	JSONReaderOptions options;
+	auto structure = DetectYAMLStructure(context, nodes, sources);
+	return JSONStructure::StructureToType(context, *structure, options.max_depth, options.field_appearance_threshold,
+	                                      options.map_inference_threshold);
+}
+
+bool YAMLReader::DetectYAMLColumns(ClientContext &context, const vector<YAML::Node> &nodes, vector<LogicalType> &types,
+                                   vector<Identifier> &names, const vector<string> &sources) {
+	JSONReaderOptions options;
+	auto structure = DetectYAMLStructure(context, nodes, sources);
+	vector<JSONFeatureColumn> features;
+	JSONScan::StructureToColumns(context, options, *structure, features, types, names);
+	return options.record_type == JSONRecordType::VALUES;
+}
+
+Value YAMLReader::YAMLNodeToValue(const YAML::Node &node, const LogicalType &target_type, bool ignore_errors) {
+	if (target_type.HasAlias() && target_type.GetAlias() == "yaml") {
+		return Value(yaml_utils::EmitYAML(node, yaml_utils::YAMLFormat::FLOW));
+	}
+	try {
+		JSONAllocator allocator(Allocator::DefaultAllocator());
+		auto doc = ReadJSONNode(node, allocator, YYJSON_READ_NUMBER_AS_RAW);
+		auto value = yyjson_doc_get_root(doc.get());
+		Vector result(target_type, 1);
+		JSONTransformOptions options(!ignore_errors, true, false, false);
+		JSONScanData scan;
+		scan.InitializeFormats(true);
+		options.date_format_map = scan.date_format_map.get();
+		if (!JSONTransform::Transform(&value, allocator.GetYYAlc(), result, 1, options, nullptr)) {
+			throw InvalidInputException("%s", options.error_message);
+		}
+		return result.GetValue(0);
+	} catch (const OutOfMemoryException &) {
+		throw;
+	} catch (const std::exception &e) {
+		throw InvalidInputException("line %d, column %d: %s", node.Mark().line + 1, node.Mark().column + 1,
+		                            ErrorData(e).RawMessage());
+	}
 }
 
 } // namespace duckdb

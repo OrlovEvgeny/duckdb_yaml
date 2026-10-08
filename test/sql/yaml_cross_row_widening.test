@@ -10,7 +10,7 @@ require yaml
 query I
 SELECT typeof(count) FROM read_yaml('test/yaml/cross_row_widening.yaml') LIMIT 1;
 ----
-SMALLINT
+BIGINT
 
 # integer + double across records -> DOUBLE.
 query I
@@ -28,4 +28,4 @@ SELECT sum(count) FROM read_yaml('test/yaml/cross_row_widening.yaml');
 query I
 SELECT typeof(mixed) FROM read_yaml('test/yaml/cross_row_widening.yaml') LIMIT 1;
 ----
-yaml
+JSON

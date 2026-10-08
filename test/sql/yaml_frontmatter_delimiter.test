@@ -49,7 +49,7 @@ bom title	7	# Body after BOM
 query I
 SELECT typeof(count) FROM read_yaml_frontmatter('test/yaml/frontmatter_delimiters/bom.md');
 ----
-TINYINT
+BIGINT
 
 # ---------------------------------------------------------------------------
 # CRLF line endings: fields parse, and no stray '\r' is left dangling on the last
@@ -64,7 +64,7 @@ crlf title	42
 query II
 SELECT title = 'crlf title', typeof(count) FROM read_yaml_frontmatter('test/yaml/frontmatter_delimiters/crlf.md');
 ----
-true	TINYINT
+1	BIGINT
 
 # ---------------------------------------------------------------------------
 # The empty-block fix from #50 must hold under CRLF and with a "..." closer too:

@@ -4,8 +4,18 @@
 
 require yaml
 
+statement error
+SELECT * FROM parse_yaml('payload: &p ' || repeat('x', 1048576) || E'\nrefs: [' || repeat('*p,', 64) || '*p]');
+----
+maximum byte budget (67108864)
+
+query I
+SELECT length(payload) FROM parse_yaml('payload: &p ' || repeat('x', 1048576) || E'\nrefs: [*p, *p]');
+----
+1048576
+
 # ============================================================================
-# Limits are exposed to SQL and have sane (positive) defaults
+# Limits can be inspected but cannot be changed by SQL users
 # ============================================================================
 
 query III
@@ -42,44 +52,29 @@ b: *x') IS NOT NULL;
 true
 
 # ============================================================================
-# Nesting-depth guard (our configurable cap, independent of yaml-cpp's own
-# parse-time DepthGuard<500>). Input that parses but nests past the cap yields
-# a clean error, not a crash. Uses yaml(...) so the value reaches the guarded
-# traversal directly (cap=10, input depth=20).
+# Parser and traversal depth guards use fixed production limits.
 # ============================================================================
 
-statement ok
-SELECT yaml_set_max_nesting_depth(10);
-
 statement error
-SELECT yaml_to_json(yaml(repeat('[', 20) || 'z' || repeat(']', 20)));
+SELECT yaml_to_json(yaml(repeat('[', 1001) || 'z' || repeat(']', 1001)));
 ----
-nesting
+Invalid YAML
 
 # The extraction/unnest path navigator recurses once per path component, so an
 # over-long attacker-supplied path is bounded too.
 statement error
-SELECT yaml_extract('a: 1', '$' || repeat('.a', 15));
+SELECT yaml_extract('a: 1', '$' || repeat('.a', 1001));
 ----
 nesting
 
-# restore the default and confirm the same input parses again
-statement ok
-SELECT yaml_set_max_nesting_depth(1000);
-
+# Ordinary nesting remains valid
 query I
 SELECT yaml_to_json(yaml(repeat('[', 20) || 'z' || repeat(']', 20))) IS NOT NULL;
 ----
 true
 
 # ============================================================================
-# Alias/anchor expansion bomb (billion-laughs). A tiny anchor chain whose full
-# re-materialization is ~1.3k node visits - far above the lowered budget but
-# bounded so it cannot exhaust the test runner even if the guard regressed.
 # ============================================================================
-
-statement ok
-SELECT yaml_set_max_expansion_nodes(500);
 
 statement error
 SELECT yaml_to_json(yaml('defs:
@@ -88,9 +83,15 @@ SELECT yaml_to_json(yaml('defs:
   - &a2 [*a1, *a1, *a1, *a1]
   - &a3 [*a2, *a2, *a2, *a2]
   - &a4 [*a3, *a3, *a3, *a3]
-root: *a4'));
+  - &a5 [*a4, *a4, *a4, *a4]
+  - &a6 [*a5, *a5, *a5, *a5]
+  - &a7 [*a6, *a6, *a6, *a6]
+  - &a8 [*a7, *a7, *a7, *a7]
+  - &a9 [*a8, *a8, *a8, *a8]
+  - &a10 [*a9, *a9, *a9, *a9]
+root: *a10'));
 ----
-budget
+expansion
 
 # The same budget guards the other functions that walk the whole node tree
 # with their own recursion (yaml_structure / yaml_contains / yaml_merge_patch).
@@ -101,9 +102,15 @@ SELECT yaml_structure('defs:
   - &a2 [*a1, *a1, *a1, *a1]
   - &a3 [*a2, *a2, *a2, *a2]
   - &a4 [*a3, *a3, *a3, *a3]
-root: *a4');
+  - &a5 [*a4, *a4, *a4, *a4]
+  - &a6 [*a5, *a5, *a5, *a5]
+  - &a7 [*a6, *a6, *a6, *a6]
+  - &a8 [*a7, *a7, *a7, *a7]
+  - &a9 [*a8, *a8, *a8, *a8]
+  - &a10 [*a9, *a9, *a9, *a9]
+root: *a10');
 ----
-budget
+expansion
 
 statement error
 SELECT yaml_contains('defs:
@@ -112,9 +119,15 @@ SELECT yaml_contains('defs:
   - &a2 [*a1, *a1, *a1, *a1]
   - &a3 [*a2, *a2, *a2, *a2]
   - &a4 [*a3, *a3, *a3, *a3]
-root: *a4', 'x: 1');
+  - &a5 [*a4, *a4, *a4, *a4]
+  - &a6 [*a5, *a5, *a5, *a5]
+  - &a7 [*a6, *a6, *a6, *a6]
+  - &a8 [*a7, *a7, *a7, *a7]
+  - &a9 [*a8, *a8, *a8, *a8]
+  - &a10 [*a9, *a9, *a9, *a9]
+root: *a10', 'x: 1');
 ----
-budget
+expansion
 
 statement error
 SELECT yaml_merge_patch('defs:
@@ -123,15 +136,17 @@ SELECT yaml_merge_patch('defs:
   - &a2 [*a1, *a1, *a1, *a1]
   - &a3 [*a2, *a2, *a2, *a2]
   - &a4 [*a3, *a3, *a3, *a3]
-root: *a4', 'x: 1');
+  - &a5 [*a4, *a4, *a4, *a4]
+  - &a6 [*a5, *a5, *a5, *a5]
+  - &a7 [*a6, *a6, *a6, *a6]
+  - &a8 [*a7, *a7, *a7, *a7]
+  - &a9 [*a8, *a8, *a8, *a8]
+  - &a10 [*a9, *a9, *a9, *a9]
+root: *a10', 'x: 1');
 ----
-budget
+expansion
 
-# Restore the production default; a small legitimate document with a repeated
-# alias still converts fine (budget is not tripped by ordinary reuse).
-statement ok
-SELECT yaml_set_max_expansion_nodes(50000000);
-
+# Ordinary alias reuse remains valid.
 query I
 SELECT yaml_to_json('shared: &x [1, 2, 3]
 a: *x
@@ -145,18 +160,11 @@ true
 # capped; scalar string input was not - finding #3).
 # ============================================================================
 
-statement ok
-SELECT yaml_set_max_input_size(64);
-
 statement error
 SELECT from_yaml(repeat('a: 1
-', 100), {'a': 0});
+', 4000000), {'a': 0});
 ----
 maximum allowed size
-
-# restore
-statement ok
-SELECT yaml_set_max_input_size(16777216);
 
 query I
 SELECT from_yaml('a: 1', {'a': 0}) IS NOT NULL;

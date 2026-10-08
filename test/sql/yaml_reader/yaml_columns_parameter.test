@@ -133,29 +133,16 @@ SELECT * FROM read_yaml('test/yaml/simple.yaml', columns=['VARCHAR', 'INTEGER'])
 ----
 columns parameter must be a struct (e.g., {name: 'VARCHAR', id: 'INTEGER'})
 
-# Test with DATE type (if supported by type detection)
-statement ok
-CREATE TABLE date_columns AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'name': 'VARCHAR', 'age': 'DATE'});
-
-query IIIIII
-DESCRIBE date_columns;
+# Numeric ages cannot be converted to temporal types.
+statement error
+SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'age': 'DATE'});
 ----
-name	VARCHAR	YES	NULL	NULL	NULL
-age	DATE	YES	NULL	NULL	NULL
-is_active	BOOLEAN	YES	NULL	NULL	NULL
+Unable to cast
 
-# Test with TIMESTAMP type
-statement ok
-CREATE TABLE timestamp_columns AS 
-SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'name': 'VARCHAR', 'age': 'TIMESTAMP'});
-
-query IIIIII
-DESCRIBE timestamp_columns;
+statement error
+SELECT * FROM read_yaml('test/yaml/simple.yaml', columns={'age': 'TIMESTAMP'});
 ----
-name	VARCHAR	YES	NULL	NULL	NULL
-age	TIMESTAMP	YES	NULL	NULL	NULL
-is_active	BOOLEAN	YES	NULL	NULL	NULL
+Unable to cast
 
 # Test columns parameter with read_yaml_objects function
 statement ok
@@ -191,5 +178,5 @@ query IIIIII
 DESCRIBE nonexistent_column;
 ----
 name	VARCHAR	YES	NULL	NULL	NULL
-age	TINYINT	YES	NULL	NULL	NULL
+age	BIGINT	YES	NULL	NULL	NULL
 is_active	BOOLEAN	YES	NULL	NULL	NULL

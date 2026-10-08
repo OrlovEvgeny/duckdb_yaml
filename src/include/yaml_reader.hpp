@@ -130,8 +130,7 @@ private:
 	/**
 	 * @brief Global init function for read_yaml
 	 */
-	static unique_ptr<GlobalTableFunctionState> YAMLReadRowsInit(ClientContext &context,
-	                                                             TableFunctionInitInput &input);
+	static unique_ptr<GlobalTableFunctionState> YAMLReadRowsInit(ClientContext &context, TableFunctionInitInput &input);
 
 	/**
 	 * @brief Local init function for read_yaml
@@ -248,7 +247,7 @@ public:
 	 * @param node YAML node to inspect
 	 * @return LogicalType The detected DuckDB type
 	 */
-	static LogicalType DetectYAMLType(const YAML::Node &node);
+	static LogicalType DetectYAMLType(ClientContext &context, const YAML::Node &node);
 
 	/**
 	 * @brief Detect YAML type across multiple documents with jagged schema support
@@ -256,7 +255,11 @@ public:
 	 * @param nodes Vector of YAML nodes to inspect for merged schema
 	 * @return LogicalType The detected DuckDB type with merged fields
 	 */
-	static LogicalType DetectJaggedYAMLType(const vector<YAML::Node> &nodes);
+	static LogicalType DetectJaggedYAMLType(ClientContext &context, const vector<YAML::Node> &nodes,
+	                                        const vector<string> &sources = {});
+
+	static bool DetectYAMLColumns(ClientContext &context, const vector<YAML::Node> &nodes, vector<LogicalType> &types,
+	                              vector<Identifier> &names, const vector<string> &sources = {});
 
 	/**
 	 * @brief Convert a YAML node to a DuckDB value
@@ -265,7 +268,7 @@ public:
 	 * @param target_type Target type to convert to
 	 * @return Value The converted value
 	 */
-	static Value YAMLNodeToValue(const YAML::Node &node, const LogicalType &target_type);
+	static Value YAMLNodeToValue(const YAML::Node &node, const LogicalType &target_type, bool ignore_errors = false);
 
 	/**
 	 * @brief Read a YAML file and parse it into documents
@@ -276,7 +279,8 @@ public:
 	 * @return vector<YAML::Node> Parsed YAML documents
 	 */
 	static vector<YAML::Node> ReadYAMLFile(ClientContext &context, const string &file_path,
-	                                       const YAMLReadOptions &options);
+	                                       const YAMLReadOptions &options,
+	                                       vector<YAML::Mark> *document_marks = nullptr);
 
 	/**
 	 * @brief Parse a multi-document YAML file with error recovery
@@ -341,25 +345,6 @@ public:
 	 * @return string The sanitized YAML content with document suffixes removed
 	 */
 	static string StripDocumentSuffixes(const string &yaml_content);
-
-	/**
-	 * @brief Helper function to merge two struct types, preserving fields from both
-	 *
-	 * @param type1 First struct type
-	 * @param type2 Second struct type
-	 * @return LogicalType A merged struct with fields from both inputs
-	 */
-	static LogicalType MergeStructTypes(const LogicalType &type1, const LogicalType &type2);
-
-	/**
-	 * @brief Widen two differing scalar field types to a common type (issue #42).
-	 *
-	 * Numeric types promote along DOUBLE > HUGEINT > BIGINT > INTEGER > SMALLINT so that e.g.
-	 * TINYINT + SMALLINT -> SMALLINT and INT + DOUBLE -> DOUBLE, matching the within-node
-	 * sequence widening. Genuinely incompatible pairs (number vs string) return the YAML type.
-	 * Callers that want a VARCHAR fallback instead should guard on IsNumeric() before calling.
-	 */
-	static LogicalType WidenConflictingScalarTypes(const LogicalType &type1, const LogicalType &type2);
 
 	/**
 	 * @brief Bind the columns parameter for explicit type specification
@@ -446,11 +431,12 @@ struct YAMLReadLocalState : public LocalTableFunctionState {
 	static constexpr idx_t FILE_SHIFT = 32;
 
 	idx_t file_index = DConstants::INVALID_INDEX; // file this worker is processing / last processed
-	string current_filename;                      // name of that file
-	idx_t chunk_counter = 0;                      // within-file index for the NEXT produced chunk
-	idx_t last_batch_index = 0;                   // batch index of the most recent chunk
-	bool have_file = false;                       // a file is claimed and being processed
-	bool file_loaded = false;                     // per-file resources are initialized
+	vector<YAML::Mark> document_marks;
+	string current_filename;    // name of that file
+	idx_t chunk_counter = 0;    // within-file index for the NEXT produced chunk
+	idx_t last_batch_index = 0; // batch index of the most recent chunk
+	bool have_file = false;     // a file is claimed and being processed
+	bool file_loaded = false;   // per-file resources are initialized
 
 	// Per-file extracted row nodes / documents (loaded lazily per file)
 	vector<YAML::Node> file_nodes;

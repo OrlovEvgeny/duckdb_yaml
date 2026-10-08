@@ -1,4 +1,6 @@
 #include "yaml_reader.hpp"
+#include "duckdb/common/error_data.hpp"
+#include "yaml_utils.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/enums/file_glob_options.hpp"
@@ -221,7 +223,7 @@ vector<string> YAMLReader::GetGlobFiles(ClientContext &context, const string &pa
 
 // Helper to read a single file and parse it
 vector<YAML::Node> YAMLReader::ReadYAMLFile(ClientContext &context, const string &file_path,
-                                            const YAMLReadOptions &options) {
+                                            const YAMLReadOptions &options, vector<YAML::Mark> *document_marks) {
 	auto &fs = FileSystem::GetFileSystem(context);
 
 	// Check if file exists
@@ -256,7 +258,7 @@ vector<YAML::Node> YAMLReader::ReadYAMLFile(ClientContext &context, const string
 			docs = YAML::LoadAll(yaml_stream);
 		} catch (const YAML::Exception &e) {
 			if (!options.ignore_errors) {
-				throw IOException("Error parsing multi-document YAML file: " + string(e.what()));
+				throw IOException("Error parsing YAML file '" + file_path + "': " + string(ErrorData(e).RawMessage()));
 			}
 
 			// On error with ignore_errors=true, try to recover partial documents
@@ -269,7 +271,7 @@ vector<YAML::Node> YAMLReader::ReadYAMLFile(ClientContext &context, const string
 			docs.push_back(yaml_node);
 		} catch (const YAML::Exception &e) {
 			if (!options.ignore_errors) {
-				throw IOException("Error parsing YAML file: " + string(e.what()));
+				throw IOException("Error parsing YAML file '" + file_path + "': " + string(ErrorData(e).RawMessage()));
 			}
 			// With ignore_errors=true for single doc, we can try to parse it more leniently
 			auto recovered = RecoverPartialYAMLDocuments(content);
@@ -279,7 +281,29 @@ vector<YAML::Node> YAMLReader::ReadYAMLFile(ClientContext &context, const string
 		}
 	}
 
-	return docs;
+	if (document_marks) {
+		document_marks->clear();
+		for (const auto &doc : docs) {
+			document_marks->push_back(doc.Mark());
+		}
+	}
+	vector<YAML::Node> valid_docs;
+	for (idx_t i = 0; i < docs.size(); i++) {
+		auto &doc = docs[i];
+		try {
+			if (!doc.IsDefined() || doc.IsNull()) {
+				continue;
+			}
+			doc.reset(yaml_utils::ExpandMerges(doc));
+			valid_docs.push_back(doc);
+		} catch (const std::exception &e) {
+			if (!options.ignore_errors) {
+				throw IOException("YAML file '%s', document %llu: %s", file_path, (unsigned long long)i + 1,
+				                  ErrorData(e).RawMessage());
+			}
+		}
+	}
+	return valid_docs;
 }
 
 } // namespace duckdb

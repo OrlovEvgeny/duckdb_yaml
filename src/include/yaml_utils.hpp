@@ -36,9 +36,7 @@ YAMLStringStyle ResolveStringStyle(YAMLStringStyle style, YAMLFormat format);
 //   single top-level conversion. Because alias/anchor references are resolved
 //   to shared nodes (a DAG) but every consumer re-materializes them, a small
 //   "&a […] *a …" chain expands exponentially; counting every visit (without
-//   de-duplication) bounds that expansion. The default is well above the node
-//   count of any legitimate document that fits under MAX_INPUT_SIZE (a 16 MB
-//   input holds at most a few million nodes), so real files are unaffected.
+//   de-duplication) bounds that expansion.
 // - MAX_NESTING_DEPTH bounds our own recursive descent. yaml-cpp already caps
 //   *parse* depth at 500 (DepthGuard) and throws a catchable exception, so this
 //   is a defense-in-depth guard that mainly covers the Value→YAML paths, which
@@ -46,9 +44,10 @@ YAMLStringStyle ResolveStringStyle(YAMLStringStyle style, YAMLFormat format);
 // - MAX_INPUT_SIZE bounds string input to the scalar functions and the
 //   frontmatter reader, which previously had no size cap (only the file
 //   readers did).
-constexpr idx_t YAML_DEFAULT_MAX_EXPANSION_NODES = 50000000; // 50M node visits
-constexpr idx_t YAML_DEFAULT_MAX_NESTING_DEPTH = 1000;       // recursion depth
-constexpr idx_t YAML_DEFAULT_MAX_INPUT_SIZE = 16777216;      // 16 MB
+constexpr idx_t YAML_DEFAULT_MAX_EXPANSION_NODES = 1000000;
+constexpr idx_t YAML_DEFAULT_MAX_EXPANSION_BYTES = 67108864;
+constexpr idx_t YAML_DEFAULT_MAX_NESTING_DEPTH = 1000;  // recursion depth
+constexpr idx_t YAML_DEFAULT_MAX_INPUT_SIZE = 16777216; // 16 MB
 
 // Global YAML settings management
 class YAMLSettings {
@@ -81,6 +80,7 @@ private:
 // whole conversion.
 struct YAMLTraversalBudget {
 	idx_t nodes = 0;
+	idx_t bytes = 0;
 	idx_t depth = 0;
 	idx_t max_nodes;
 	idx_t max_depth;
@@ -135,6 +135,8 @@ std::string EmitYAML(const YAML::Node &node, YAMLFormat format, YAMLStringStyle 
 // Emit multiple YAML documents
 std::string EmitYAMLMultiDoc(const std::vector<YAML::Node> &docs, YAMLFormat format);
 
+YAML::Node ExpandMerges(const YAML::Node &node);
+
 // Parse YAML string (supports multi-document)
 std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_document = true);
 
@@ -143,7 +145,7 @@ std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_docume
 //===--------------------------------------------------------------------===//
 
 // Convert YAML node to JSON string
-std::string YAMLNodeToJSON(const YAML::Node &node);
+std::string YAMLNodeToJSON(const YAML::Node &node, bool inference = false);
 
 //===--------------------------------------------------------------------===//
 // DuckDB Value to YAML Conversion

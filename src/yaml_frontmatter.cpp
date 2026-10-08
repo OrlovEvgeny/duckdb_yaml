@@ -218,66 +218,24 @@ static unique_ptr<FunctionData> YAMLFrontmatterBind(ClientContext &context, Tabl
 
 	if (!result->options.as_yaml_objects) {
 		// Default: expand fields as columns by merging schemas from all files
-		unordered_map<string, LogicalType> merged_types;
-		vector<string> column_order;
-		unordered_set<string> seen_columns;
-
+		vector<YAML::Node> sample_nodes;
 		for (const auto &file_path : result->file_paths) {
 			try {
-				string content = ReadFileContent(context, file_path);
-				auto extracted = ExtractFrontmatter(content);
-				string frontmatter = extracted.first;
-
-				if (frontmatter.empty()) {
-					continue;
-				}
-
-				// Parse the frontmatter YAML
-				YAML::Node node = YAML::Load(frontmatter);
-
-				if (!node.IsMap()) {
-					continue;
-				}
-
-				// Process each field
-				for (auto it = node.begin(); it != node.end(); ++it) {
-					string key = it->first.Scalar();
-
-					// Track column order from first occurrence
-					if (seen_columns.find(key) == seen_columns.end()) {
-						column_order.push_back(key);
-						seen_columns.insert(key);
-					}
-
-					// Detect type
-					LogicalType value_type = YAMLReader::DetectYAMLType(it->second);
-
-					// Merge with existing type
-					auto existing = merged_types.find(key);
-					if (existing == merged_types.end()) {
-						merged_types[key] = value_type;
-					} else if (existing->second.id() == LogicalTypeId::STRUCT &&
-					           value_type.id() == LogicalTypeId::STRUCT) {
-						merged_types[key] = YAMLReader::MergeStructTypes(existing->second, value_type);
-					} else if (existing->second.id() != value_type.id()) {
-						// Widen compatible numerics across frontmatter docs; VARCHAR otherwise (issue #42).
-						if (existing->second.IsNumeric() && value_type.IsNumeric()) {
-							merged_types[key] = YAMLReader::WidenConflictingScalarTypes(existing->second, value_type);
-						} else {
-							merged_types[key] = LogicalType::VARCHAR;
-						}
-					}
+				auto extracted = ExtractFrontmatter(ReadFileContent(context, file_path));
+				auto node = yaml_utils::ExpandMerges(YAML::Load(extracted.first));
+				if (node.IsMap()) {
+					sample_nodes.push_back(node);
 				}
 			} catch (...) {
-				// Skip files that fail to parse
 				continue;
 			}
 		}
-
-		// Add columns in order
-		for (const auto &col : column_order) {
-			names.push_back(CompatMakeName(col));
-			return_types.push_back(merged_types[col]);
+		auto type = YAMLReader::DetectJaggedYAMLType(context, sample_nodes);
+		if (type.id() == LogicalTypeId::STRUCT) {
+			for (const auto &child : StructType::GetChildTypes(type)) {
+				names.push_back(CompatMakeName(CompatIdentifierName(child.first)));
+				return_types.push_back(child.second);
+			}
 		}
 
 		// If no fields detected, add a dummy column
@@ -355,7 +313,7 @@ static void YAMLFrontmatterFunction(ClientContext &context, TableFunctionInput &
 			if (!bind_data.options.as_yaml_objects) {
 				// Default: parse frontmatter and extract fields as columns
 				try {
-					YAML::Node node = YAML::Load(frontmatter);
+					YAML::Node node = yaml_utils::ExpandMerges(YAML::Load(frontmatter));
 
 					if (node.IsMap()) {
 						// Process each column (skip filename if present)
@@ -421,10 +379,10 @@ void RegisterYAMLFrontmatterFunction(ExtensionLoader &loader) {
 
 	// Add named parameters
 	DeclareNamedParameters(read_yaml_frontmatter, {
-		{"as_yaml_objects", LogicalType::BOOLEAN},
-		{"content", LogicalType::BOOLEAN},
-		{"filename", LogicalType::BOOLEAN},
-	});
+	                                                  {"as_yaml_objects", LogicalType::BOOLEAN},
+	                                                  {"content", LogicalType::BOOLEAN},
+	                                                  {"filename", LogicalType::BOOLEAN},
+	                                              });
 
 	CreateTableFunctionInfo info(std::move(read_yaml_frontmatter));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;

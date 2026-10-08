@@ -57,4 +57,4 @@ SELECT id, name FROM multi_doc_partial_invalid WHERE name = 'John';
 statement error
 SELECT * FROM read_yaml('test/yaml/partial_invalid.yaml');
 ----
-IO Error: Error processing YAML file 'test/yaml/partial_invalid.yaml': 
+Error parsing YAML file 'test/yaml/partial_invalid.yaml'

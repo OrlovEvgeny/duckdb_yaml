@@ -1,0 +1,174 @@
+# name: test/sql/yaml_review_regressions.test
+# description: Scalar preservation, document recovery and bounded aliases
+# group: [yaml]
+
+require yaml
+
+query T
+SELECT yaml_to_json('a: off
+b: 0o17
+c: +1
+d: .5
+e: -.inf');
+----
+{"a":"off","b":"0o17","c":"+1","d":".5","e":"-.inf"}
+
+query TTTTTTTTT
+SELECT typeof(ports), ports[1], typeof(tagged), tagged, typeof(day), day, typeof(plain_day), typeof(clock), typeof(stamp)
+FROM parse_yaml('ports: ["22:22"]
+tagged: !!str 1:20
+day: "2024-01-15"
+plain_day: 2024-01-15
+clock: 12:30
+stamp: 2024-01-15T12:30:00Z');
+----
+VARCHAR[]	22:22	VARCHAR	1:20	VARCHAR	2024-01-15	DATE	TIME	TIMESTAMP WITH TIME ZONE
+
+query T
+SELECT yaml_to_json('a: 012
+b: 0x10
+c: .inf
+d: .nan
+e: yes
+f: on
+g: y
+h: True
+i: TRUE
+j: -0
+k: 123456789012345678901234567890');
+----
+{"a":"012","b":"0x10","c":".inf","d":".nan","e":"yes","f":"on","g":"y","h":"True","i":"TRUE","j":-0,"k":123456789012345678901234567890}
+
+statement ok
+COPY (SELECT 'version: 1.10
+big: 123456789012345678901234567890') TO '{TEST_DIR}/yaml_numbers.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+query TT
+SELECT version, big FROM read_yaml('{TEST_DIR}/yaml_numbers.yaml', columns={'version':'VARCHAR', 'big':'HUGEINT'});
+----
+1.10	123456789012345678901234567890
+
+query T
+SELECT big FROM read_yaml('{TEST_DIR}/yaml_numbers.yaml', columns={'big':'DECIMAL(38,0)'});
+----
+123456789012345678901234567890
+
+statement ok
+COPY (SELECT 'id: 1
+---
+id: abc
+---
+id: 3') TO '{TEST_DIR}/yaml_late.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_yaml('{TEST_DIR}/yaml_late.yaml', sample_size=1);
+----
+<REGEX>:.*YAML file '[^']*yaml_late.yaml', document 2: line 3, column 5: Failed to cast value to numerical: "abc".*
+
+query I
+SELECT id FROM read_yaml('{TEST_DIR}/yaml_late.yaml', sample_size=1, ignore_errors=true);
+----
+1
+NULL
+3
+
+statement ok
+COPY (SELECT 'id: 1
+---
+<<: 5
+---
+id: 3') TO '{TEST_DIR}/yaml_bad_merge.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+query I
+SELECT id FROM read_yaml('{TEST_DIR}/yaml_bad_merge.yaml', ignore_errors=true);
+----
+1
+3
+
+statement ok
+COPY (SELECT 'id: 1
+---
+id: 2
+id: 20
+---
+id: 3') TO '{TEST_DIR}/yaml_duplicate.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement error
+SELECT id FROM read_yaml('{TEST_DIR}/yaml_duplicate.yaml');
+----
+Duplicate key
+
+statement ok
+COPY (SELECT 'id: 1
+---
+loop: &loop {self: *loop}
+---
+id: 3') TO '{TEST_DIR}/yaml_cycle.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+query I
+SELECT id FROM read_yaml('{TEST_DIR}/yaml_cycle.yaml', ignore_errors=true);
+----
+1
+3
+
+statement ok
+COPY (SELECT 'obj: {id: 1}
+---
+obj: {id: abc}
+---
+obj: {id: 3}') TO '{TEST_DIR}/yaml_nested.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+query I
+SELECT obj.id FROM read_yaml('{TEST_DIR}/yaml_nested.yaml', sample_size=1, ignore_errors=true);
+----
+1
+NULL
+3
+
+query I
+SELECT count(*) FROM parse_yaml(E'# Helm output\n---\nid: 1\n---\n# empty document\n---\nid: 2\n---');
+----
+2
+
+query TT
+SELECT yaml_extract('defaults: &d {port: 80}
+service: {<<: *d}', '$.service.port'), yaml_exists('defaults: &d {port: 80}
+service: {<<: *d}', '$.service.port');
+----
+80	true
+
+statement error
+SELECT * FROM parse_yaml('s: &s 1
+value:
+  <<: *s');
+----
+line 3, column 3
+
+statement error
+SELECT * FROM parse_yaml('~: 1');
+----
+keys must not be null
+
+statement error
+SELECT * FROM read_yaml('test/yaml/review_invalid_utf8.yaml');
+----
+<REGEX>:.*review_invalid_utf8.yaml.*line 2, column 4.*Invalid UTF-8.*
+
+statement ok
+COPY (SELECT E'# first\na: 1\n---\na: [\n---\n# third\na: 3')
+TO '{TEST_DIR}/yaml_syntax_recovery.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+query I
+SELECT a FROM read_yaml('{TEST_DIR}/yaml_syntax_recovery.yaml', ignore_errors=true);
+----
+1
+3
+
+statement ok
+COPY (SELECT E'a: 1\n---\n# empty\n---\na: abc')
+TO '{TEST_DIR}/yaml_empty_then_bad.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_yaml('{TEST_DIR}/yaml_empty_then_bad.yaml', sample_size=1);
+----
+<REGEX>:.*yaml_empty_then_bad.yaml.*document 3.*line 5.*

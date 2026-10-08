@@ -1,6 +1,9 @@
+#include "json_scan.hpp"
 #include "yaml_reader.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb_compat.hpp"
 #include "yaml_types.hpp"
+#include "yaml_utils.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -36,106 +39,10 @@ static MultiDocumentMode ParseMultiDocumentMode(const Value &value) {
 	throw BinderException("multi_document parameter must be a boolean or string");
 }
 
-// Helper function to merge two struct types, preserving fields from both
-// This is crucial for handling nested properties that might exist in some documents but not others
-// For example, if document1 has {user: {profile: {name: "John"}}} and
-// document2 has {user: {profile: {name: "Jane", age: 42}}},
-// we need to make sure the final schema includes both name and age in the profile struct
-// When two records give a field different scalar types, widen to a common type instead of
-// dropping to the YAML/VARCHAR fallback. Numeric types promote along the ladder
-// (DOUBLE > HUGEINT > BIGINT > INTEGER > SMALLINT > TINYINT), matching the within-node sequence
-// widening in yaml_reader_types.cpp so the multi-row read_yaml case is consistent with it.
-// Genuinely incompatible types (e.g. number vs string) still fall back to YAML to preserve data.
-// (issue #42: cross-row numeric type degradation)
-LogicalType YAMLReader::WidenConflictingScalarTypes(const LogicalType &a, const LogicalType &b) {
-	if (a.IsNumeric() && b.IsNumeric()) {
-		if (a.id() == LogicalTypeId::DOUBLE || b.id() == LogicalTypeId::DOUBLE || a.id() == LogicalTypeId::FLOAT ||
-		    b.id() == LogicalTypeId::FLOAT) {
-			return LogicalType::DOUBLE;
-		}
-		if (a.id() == LogicalTypeId::HUGEINT || b.id() == LogicalTypeId::HUGEINT) {
-			return LogicalType::HUGEINT;
-		}
-		if (a.id() == LogicalTypeId::BIGINT || b.id() == LogicalTypeId::BIGINT) {
-			return LogicalType::BIGINT;
-		}
-		if (a.id() == LogicalTypeId::INTEGER || b.id() == LogicalTypeId::INTEGER) {
-			return LogicalType::INTEGER;
-		}
-		// Any remaining pair of differing small integer types (incl. mixed signedness) fits in SMALLINT.
-		return LogicalType::SMALLINT;
-	}
-	return YAMLTypes::YAMLType();
-}
-
-LogicalType YAMLReader::MergeStructTypes(const LogicalType &type1, const LogicalType &type2) {
-	if (type1.id() != LogicalTypeId::STRUCT || type2.id() != LogicalTypeId::STRUCT) {
-		// Type conflict (e.g., STRUCT vs scalar) - fall back to YAML to preserve data
-		// This matches the JSON extension's behavior (which falls back to JSON type)
-		return YAMLTypes::YAMLType();
-	}
-
-	// Get child types from both structs
-	auto struct1_children = StructType::GetChildTypes(type1);
-	auto struct2_children = StructType::GetChildTypes(type2);
-
-	// Handle empty structs (issue #33): empty maps {} create STRUCT() with no children
-	// When merging with a non-empty struct, return the non-empty one
-	// This allows empty YAML maps to coexist with populated maps in lists/documents
-	if (struct1_children.empty()) {
-		return type2;
-	}
-	if (struct2_children.empty()) {
-		return type1;
-	}
-
-	// Start with all children from the first struct
-	child_list_t<LogicalType> merged_children = struct1_children;
-
-	// Add any new fields from the second struct
-	for (const auto &child2 : struct2_children) {
-		bool found = false;
-		for (size_t i = 0; i < merged_children.size(); i++) {
-			if (merged_children[i].first == child2.first) {
-				// Field exists in both structs, recursively merge if both are structs
-				if (merged_children[i].second.id() == LogicalTypeId::STRUCT &&
-				    child2.second.id() == LogicalTypeId::STRUCT) {
-					merged_children[i].second = MergeStructTypes(merged_children[i].second, child2.second);
-				} else if (merged_children[i].second.id() == LogicalTypeId::LIST &&
-				           child2.second.id() == LogicalTypeId::LIST) {
-					// Both are lists - merge the child types if they are structs
-					auto merged_child = ListType::GetChildType(merged_children[i].second);
-					auto child2_child = ListType::GetChildType(child2.second);
-					if (merged_child.id() == LogicalTypeId::STRUCT && child2_child.id() == LogicalTypeId::STRUCT) {
-						merged_children[i].second = LogicalType::LIST(MergeStructTypes(merged_child, child2_child));
-					} else if (merged_child.id() != child2_child.id()) {
-						// Different list child scalar types - widen instead of collapsing to YAML (issue #42).
-						merged_children[i].second =
-						    LogicalType::LIST(WidenConflictingScalarTypes(merged_child, child2_child));
-					}
-				} else if (merged_children[i].second.id() != child2.second.id()) {
-					// Different scalar types for a field across records - widen (e.g. TINYINT +
-					// SMALLINT -> SMALLINT) instead of collapsing to YAML (issue #42).
-					merged_children[i].second =
-					    WidenConflictingScalarTypes(merged_children[i].second, child2.second);
-				}
-				found = true;
-				break;
-			}
-		}
-
-		// Add new field if not found in first struct
-		if (!found) {
-			merged_children.push_back(child2);
-		}
-	}
-
-	return LogicalType::STRUCT(merged_children);
-}
-
 // Bind data structure for read_yaml
 // Bind data structure for read_yaml (immutable after bind)
 struct YAMLReadRowsBindData : public TableFunctionData {
+	bool values = false;
 	YAMLReadRowsBindData(vector<string> files, YAMLReader::YAMLReadOptions options)
 	    : files(std::move(files)), options(options) {
 	}
@@ -267,6 +174,7 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadRowsBind(ClientContext &context, Ta
 
 	// Sample files for schema detection
 	vector<YAML::Node> sample_nodes;
+	vector<string> sample_sources;
 	vector<YAML::Node> sample_docs; // for FRONTMATTER / LIST mode
 	idx_t sampled_rows = 0;
 	idx_t sampled_files = 0;
@@ -317,6 +225,7 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadRowsBind(ClientContext &context, Ta
 						break;
 					}
 					sample_nodes.push_back(node);
+					sample_sources.push_back(current_file);
 					sampled_rows++;
 				}
 				sampled_files++;
@@ -326,7 +235,7 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadRowsBind(ClientContext &context, Ta
 			}
 		} catch (const std::exception &e) {
 			if (!options.ignore_errors) {
-				throw IOException("Error processing YAML file '" + current_file + "': " + string(e.what()));
+				throw;
 			}
 		}
 	}
@@ -345,7 +254,7 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadRowsBind(ClientContext &context, Ta
 						string key = "meta_" + it->first.Scalar();
 						LogicalType type;
 						if (options.auto_detect_types) {
-							type = DetectYAMLType(it->second);
+							type = DetectYAMLType(context, it->second);
 						} else {
 							type = LogicalType::VARCHAR;
 						}
@@ -380,7 +289,7 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadRowsBind(ClientContext &context, Ta
 			sample_nodes.push_back(doc);
 			sampled_rows++;
 		}
-		LogicalType list_element_type = DetectJaggedYAMLType(sample_nodes);
+		LogicalType list_element_type = DetectJaggedYAMLType(context, sample_nodes);
 		names.push_back(CompatMakeName(options.list_column_name));
 		return_types.push_back(LogicalType::LIST(list_element_type));
 		result->names = CompatNameStrings(names);
@@ -403,83 +312,31 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadRowsBind(ClientContext &context, Ta
 		return std::move(result);
 	}
 
-	// Extract schema from sampled row nodes, considering user-provided column types
-	unordered_map<string, LogicalType> user_specified_types;
-	unordered_map<string, LogicalType> detected_types;
-
-	for (size_t idx = 0; idx < options.column_names.size() && idx < options.column_types.size(); idx++) {
-		user_specified_types[options.column_names[idx]] = options.column_types[idx];
-	}
-
-	vector<string> column_order;
-	unordered_set<string> seen_columns;
-
-	for (auto &node : sample_nodes) {
-		if (!node.IsMap()) {
-			continue;
-		}
-		for (auto it = node.begin(); it != node.end(); ++it) {
-			std::string key = it->first.Scalar();
-			YAML::Node value = it->second;
-
-			if (seen_columns.find(key) == seen_columns.end()) {
-				column_order.push_back(key);
-				seen_columns.insert(key);
-			}
-
-			auto user_type_it = user_specified_types.find(key);
-			if (user_type_it != user_specified_types.end()) {
-				detected_types[key] = user_type_it->second;
-			} else if (detected_types.find(key) == detected_types.end()) {
-				LogicalType value_type;
-				if (options.auto_detect_types) {
-					value_type = DetectYAMLType(value);
-				} else {
-					value_type = LogicalType::VARCHAR;
-				}
-				detected_types[key] = value_type;
-			} else {
-				LogicalType value_type;
-				if (options.auto_detect_types) {
-					value_type = DetectYAMLType(value);
-				} else {
-					value_type = LogicalType::VARCHAR;
-				}
-
-				if (detected_types[key].id() == LogicalTypeId::STRUCT && value_type.id() == LogicalTypeId::STRUCT) {
-					detected_types[key] = MergeStructTypes(detected_types[key], value_type);
-				} else if (detected_types[key].id() != value_type.id()) {
-					detected_types[key] = WidenConflictingScalarTypes(detected_types[key], value_type);
-				}
+	vector<Identifier> inferred_names;
+	vector<LogicalType> inferred_types;
+	result->values = DetectYAMLColumns(context, sample_nodes, inferred_types, inferred_names, sample_sources);
+	for (idx_t col = 0; col < inferred_names.size(); col++) {
+		auto column_type = options.auto_detect_types ? inferred_types[col] : LogicalType::VARCHAR;
+		for (idx_t i = 0; i < options.column_names.size(); i++) {
+			if (options.column_names[i] == inferred_names[col].GetIdentifierName()) {
+				column_type = options.column_types[i];
+				break;
 			}
 		}
-	}
-
-	// Build the final schema in document order
-	for (const auto &col : column_order) {
-		names.push_back(CompatMakeName(col));
-		return_types.push_back(detected_types[col]);
-	}
-
-	// Special handling for non-map documents
-	if (names.empty() && !sample_nodes.empty()) {
-		names.emplace_back("value");
-		if (options.auto_detect_types) {
-			return_types.emplace_back(DetectYAMLType(sample_nodes[0]));
-		} else {
-			return_types.emplace_back(LogicalType::VARCHAR);
-		}
+		names.push_back(inferred_names[col]);
+		return_types.push_back(column_type);
 	}
 
 	// Save schema
 	result->names = CompatNameStrings(names);
+	JSONScan::DeduplicateColumnNames(names);
 	result->types = return_types;
 
 	return std::move(result);
 }
 
 unique_ptr<GlobalTableFunctionState> YAMLReader::YAMLReadRowsInit(ClientContext &context,
-                                                                 TableFunctionInitInput &input) {
+                                                                  TableFunctionInitInput &input) {
 	auto result = make_uniq<YAMLReadGlobalState>();
 	auto &bind_data = input.bind_data->Cast<YAMLReadRowsBindData>();
 	result->files = bind_data.files;
@@ -487,13 +344,13 @@ unique_ptr<GlobalTableFunctionState> YAMLReader::YAMLReadRowsInit(ClientContext 
 }
 
 unique_ptr<LocalTableFunctionState> YAMLReader::YAMLReadRowsInitLocal(ExecutionContext &context,
-                                                                     TableFunctionInitInput &input,
-                                                                     GlobalTableFunctionState *global_state) {
+                                                                      TableFunctionInitInput &input,
+                                                                      GlobalTableFunctionState *global_state) {
 	return make_uniq<YAMLReadLocalState>();
 }
 
 unique_ptr<GlobalTableFunctionState> YAMLReader::YAMLReadObjectsInit(ClientContext &context,
-                                                                    TableFunctionInitInput &input) {
+                                                                     TableFunctionInitInput &input) {
 	auto result = make_uniq<YAMLReadGlobalState>();
 	auto &bind_data = input.bind_data->Cast<YAMLReadBindData>();
 	result->files = bind_data.files;
@@ -501,13 +358,13 @@ unique_ptr<GlobalTableFunctionState> YAMLReader::YAMLReadObjectsInit(ClientConte
 }
 
 unique_ptr<LocalTableFunctionState> YAMLReader::YAMLReadObjectsInitLocal(ExecutionContext &context,
-                                                                        TableFunctionInitInput &input,
-                                                                        GlobalTableFunctionState *global_state) {
+                                                                         TableFunctionInitInput &input,
+                                                                         GlobalTableFunctionState *global_state) {
 	return make_uniq<YAMLReadLocalState>();
 }
 
 OperatorPartitionData YAMLReader::YAMLReadGetPartitionData(ClientContext &context,
-                                                          TableFunctionGetPartitionInput &input) {
+                                                           TableFunctionGetPartitionInput &input) {
 	auto &lstate = input.local_state->Cast<YAMLReadLocalState>();
 	return OperatorPartitionData(lstate.last_batch_index);
 }
@@ -593,6 +450,7 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadObjectsBind(ClientContext &context,
 	auto result = make_uniq<YAMLReadBindData>(files, options);
 
 	vector<YAML::Node> sample_docs;
+	vector<string> sample_sources;
 	idx_t sampled_rows = 0;
 	idx_t sampled_files = 0;
 
@@ -605,6 +463,7 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadObjectsBind(ClientContext &context,
 						break;
 					}
 					sample_docs.push_back(doc);
+					sample_sources.push_back(file_path);
 					sampled_rows++;
 				}
 				sampled_files++;
@@ -614,7 +473,7 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadObjectsBind(ClientContext &context,
 			}
 		} catch (const std::exception &e) {
 			if (!options.ignore_errors) {
-				throw IOException("Error processing YAML file '" + file_path + "': " + string(e.what()));
+				throw;
 			}
 		}
 	}
@@ -638,7 +497,7 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadObjectsBind(ClientContext &context,
 	} else {
 		if (options.auto_detect_types) {
 			names.emplace_back("yaml");
-			auto doc_type = DetectJaggedYAMLType(sample_docs);
+			auto doc_type = DetectJaggedYAMLType(context, sample_docs, sample_sources);
 			return_types.emplace_back(doc_type);
 		} else {
 			names.emplace_back("yaml");
@@ -651,12 +510,22 @@ unique_ptr<FunctionData> YAMLReader::YAMLReadObjectsBind(ClientContext &context,
 	return std::move(result);
 }
 
+static idx_t DocumentIndex(const YAMLReadLocalState &state, const YAML::Node &node) {
+	idx_t index = 1;
+	for (idx_t i = 0; i < state.document_marks.size(); i++) {
+		const auto &mark = state.document_marks[i];
+		if (mark.pos >= 0 && mark.pos <= node.Mark().pos) {
+			index = i + 1;
+		}
+	}
+	return index;
+}
+
 void YAMLReader::YAMLReadRowsFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	const auto &bind_data = data_p.bind_data->Cast<YAMLReadRowsBindData>();
 	auto &gstate = data_p.global_state->Cast<YAMLReadGlobalState>();
 	auto &lstate = data_p.local_state->Cast<YAMLReadLocalState>();
 
-	auto &fs = FileSystem::GetFileSystem(context);
 	idx_t output_idx = 0;
 	output.Reset();
 
@@ -679,58 +548,13 @@ void YAMLReader::YAMLReadRowsFunction(ClientContext &context, TableFunctionInput
 
 		try {
 			if (!lstate.file_loaded) {
-				auto file_handle = fs.OpenFile(filename, FileFlags::FILE_FLAGS_READ);
-				auto file_size = fs.GetFileSize(*file_handle);
-
-				if (file_size > bind_data.options.maximum_object_size) {
-					if (!bind_data.options.ignore_errors) {
-						throw IOException("YAML file size (" + to_string(file_size) +
-						                  " bytes) exceeds maximum allowed size (" +
-						                  to_string(bind_data.options.maximum_object_size) + " bytes)");
-					}
-					// Skip file with ignore_errors
-					lstate.ResetFileResources();
-					lstate.have_file = false;
-					continue;
-				}
-
-				string content(file_size, ' ');
-				fs.Read(*file_handle, const_cast<char *>(content.c_str()), file_size);
-
-				if (bind_data.options.strip_document_suffixes) {
-					content = StripDocumentSuffixes(content);
-				}
-
-				vector<YAML::Node> docs;
-				if (bind_data.options.multi_document_mode != MultiDocumentMode::FIRST) {
-					try {
-						std::stringstream yaml_stream(content);
-						docs = YAML::LoadAll(yaml_stream);
-					} catch (const YAML::Exception &e) {
-						if (!bind_data.options.ignore_errors) {
-							throw IOException("Error parsing multi-document YAML file: " + string(e.what()));
-						}
-						docs = RecoverPartialYAMLDocuments(content);
-					}
-				} else {
-					try {
-						YAML::Node yaml_node = YAML::Load(content);
-						docs.push_back(yaml_node);
-					} catch (const YAML::Exception &e) {
-						if (!bind_data.options.ignore_errors) {
-							throw IOException("Error parsing YAML file: " + string(e.what()));
-						}
-						auto recovered = RecoverPartialYAMLDocuments(content);
-						if (!recovered.empty()) {
-							docs = recovered;
-						}
-					}
-				}
+				auto docs = ReadYAMLFile(context, filename, bind_data.options, &lstate.document_marks);
 
 				if (bind_data.options.multi_document_mode == MultiDocumentMode::FRONTMATTER) {
 					if (docs.size() < 2) {
 						if (!bind_data.options.ignore_errors) {
-							throw BinderException("FRONTMATTER mode requires at least 2 documents (frontmatter + data)");
+							throw BinderException(
+							    "FRONTMATTER mode requires at least 2 documents (frontmatter + data)");
 						}
 						lstate.file_nodes.clear();
 					} else {
@@ -807,7 +631,17 @@ void YAMLReader::YAMLReadRowsFunction(ClientContext &context, TableFunctionInput
 						element_type = bind_data.types[0];
 					}
 					for (const auto &doc : lstate.file_nodes) {
-						doc_values.push_back(YAMLNodeToValue(doc, element_type));
+						try {
+							doc_values.push_back(YAMLNodeToValue(doc, element_type, bind_data.options.ignore_errors));
+						} catch (const OutOfMemoryException &) {
+							throw;
+						} catch (const std::exception &e) {
+							if (!bind_data.options.ignore_errors) {
+								throw IOException("YAML file '%s', document %llu: %s", filename,
+								                  (unsigned long long)DocumentIndex(lstate, doc),
+								                  ErrorData(e).RawMessage());
+							}
+						}
 					}
 					Value list_value = Value::LIST(element_type, doc_values);
 					output.SetValue(0, output_idx, list_value);
@@ -818,33 +652,44 @@ void YAMLReader::YAMLReadRowsFunction(ClientContext &context, TableFunctionInput
 			} else {
 				idx_t fm_col_count = lstate.frontmatter_values.size();
 
-				while (lstate.current_row_index < lstate.file_nodes.size() &&
-				       output_idx < STANDARD_VECTOR_SIZE) {
+				while (lstate.current_row_index < lstate.file_nodes.size() && output_idx < STANDARD_VECTOR_SIZE) {
 					const auto &node = lstate.file_nodes[lstate.current_row_index];
+					try {
+						if (bind_data.values) {
+							Value val = YAMLNodeToValue(node, bind_data.types[0], bind_data.options.ignore_errors);
+							output.SetValue(0, output_idx, val);
+						} else {
+							idx_t col_idx = 0;
+							if (bind_data.options.multi_document_mode == MultiDocumentMode::FRONTMATTER) {
+								for (idx_t fm_idx = 0; fm_idx < fm_col_count; fm_idx++) {
+									output.SetValue(col_idx, output_idx, lstate.frontmatter_values[fm_idx]);
+									col_idx++;
+								}
+							}
+							for (; col_idx < bind_data.names.size(); col_idx++) {
+								const string &col_name = bind_data.names[col_idx];
+								const LogicalType &type = bind_data.types[col_idx];
+								YAML::Node value = node[col_name];
+								Value duckdb_value;
+								if (value) {
+									duckdb_value = YAMLNodeToValue(value, type, bind_data.options.ignore_errors);
+								} else {
+									duckdb_value = Value(type);
+								}
+								output.SetValue(col_idx, output_idx, duckdb_value);
+							}
+						}
 
-					if (bind_data.names.size() == 1 && bind_data.names[0] == "value") {
-						Value val = YAMLNodeToValue(node, bind_data.types[0]);
-						output.SetValue(0, output_idx, val);
-					} else {
-						idx_t col_idx = 0;
-						if (bind_data.options.multi_document_mode == MultiDocumentMode::FRONTMATTER) {
-							for (idx_t fm_idx = 0; fm_idx < fm_col_count; fm_idx++) {
-								output.SetValue(col_idx, output_idx, lstate.frontmatter_values[fm_idx]);
-								col_idx++;
-							}
+					} catch (const OutOfMemoryException &) {
+						throw;
+					} catch (const std::exception &e) {
+						if (!bind_data.options.ignore_errors) {
+							throw IOException("YAML file '%s', document %llu: %s", filename,
+							                  (unsigned long long)DocumentIndex(lstate, node),
+							                  ErrorData(e).RawMessage());
 						}
-						for (; col_idx < bind_data.names.size(); col_idx++) {
-							const string &col_name = bind_data.names[col_idx];
-							const LogicalType &type = bind_data.types[col_idx];
-							YAML::Node value = node[col_name];
-							Value duckdb_value;
-							if (value) {
-								duckdb_value = YAMLNodeToValue(value, type);
-							} else {
-								duckdb_value = Value(type);
-							}
-							output.SetValue(col_idx, output_idx, duckdb_value);
-						}
+						lstate.current_row_index++;
+						continue;
 					}
 
 					output_idx++;
@@ -866,7 +711,7 @@ void YAMLReader::YAMLReadRowsFunction(ClientContext &context, TableFunctionInput
 			continue;
 		} catch (const std::exception &e) {
 			if (!bind_data.options.ignore_errors) {
-				throw IOException("Error processing YAML file '" + filename + "': " + string(e.what()));
+				throw IOException("Error processing YAML file '" + filename + "': " + ErrorData(e).RawMessage());
 			}
 			lstate.ResetFileResources();
 			lstate.have_file = false;
@@ -899,7 +744,6 @@ void YAMLReader::YAMLReadObjectsFunction(ClientContext &context, TableFunctionIn
 	auto &gstate = data_p.global_state->Cast<YAMLReadGlobalState>();
 	auto &lstate = data_p.local_state->Cast<YAMLReadLocalState>();
 
-	auto &fs = FileSystem::GetFileSystem(context);
 	idx_t output_idx = 0;
 	output.Reset();
 
@@ -921,83 +765,48 @@ void YAMLReader::YAMLReadObjectsFunction(ClientContext &context, TableFunctionIn
 
 		try {
 			if (!lstate.file_loaded) {
-				auto file_handle = fs.OpenFile(filename, FileFlags::FILE_FLAGS_READ);
-				auto file_size = fs.GetFileSize(*file_handle);
-
-				if (file_size > bind_data.options.maximum_object_size) {
-					if (!bind_data.options.ignore_errors) {
-						throw IOException("YAML file size (" + to_string(file_size) +
-						                  " bytes) exceeds maximum allowed size (" +
-						                  to_string(bind_data.options.maximum_object_size) + " bytes)");
-					}
-					lstate.ResetFileResources();
-					lstate.have_file = false;
-					continue;
-				}
-
-				string content(file_size, ' ');
-				fs.Read(*file_handle, const_cast<char *>(content.c_str()), file_size);
-
-				if (bind_data.options.strip_document_suffixes) {
-					content = StripDocumentSuffixes(content);
-				}
-
-				vector<YAML::Node> docs;
-				if (bind_data.options.multi_document_mode != MultiDocumentMode::FIRST) {
-					try {
-						std::stringstream yaml_stream(content);
-						docs = YAML::LoadAll(yaml_stream);
-					} catch (const YAML::Exception &e) {
-						if (!bind_data.options.ignore_errors) {
-							throw IOException("Error parsing multi-document YAML file: " + string(e.what()));
-						}
-						docs = RecoverPartialYAMLDocuments(content);
-					}
-				} else {
-					try {
-						YAML::Node yaml_node = YAML::Load(content);
-						docs.push_back(yaml_node);
-					} catch (const YAML::Exception &e) {
-						if (!bind_data.options.ignore_errors) {
-							throw IOException("Error parsing YAML file: " + string(e.what()));
-						}
-						auto recovered = RecoverPartialYAMLDocuments(content);
-						if (!recovered.empty()) {
-							docs = recovered;
-						}
-					}
-				}
+				auto docs = ReadYAMLFile(context, filename, bind_data.options, &lstate.document_marks);
 
 				lstate.file_nodes = std::move(docs);
 				lstate.current_row_index = 0;
 				lstate.file_loaded = true;
 			}
 
-			while (lstate.current_row_index < lstate.file_nodes.size() &&
-			       output_idx < STANDARD_VECTOR_SIZE) {
+			while (lstate.current_row_index < lstate.file_nodes.size() && output_idx < STANDARD_VECTOR_SIZE) {
 				const auto &node = lstate.file_nodes[lstate.current_row_index];
-
-				if (bind_data.names.size() == 1 && bind_data.names[0] == "yaml") {
-					Value val = YAMLNodeToValue(node, bind_data.types[0]);
-					output.SetValue(0, output_idx, val);
-				} else {
-					if (node.IsMap()) {
-						for (idx_t col_idx = 0; col_idx < bind_data.names.size(); col_idx++) {
-							const string &col_name = bind_data.names[col_idx];
-							const LogicalType &col_type = bind_data.types[col_idx];
-							YAML::Node value = node[col_name];
-							Value duckdb_value;
-							if (value) {
-								duckdb_value = YAMLNodeToValue(value, col_type);
-							} else {
-								duckdb_value = Value(col_type);
-							}
-							output.SetValue(col_idx, output_idx, duckdb_value);
-						}
-					} else if (bind_data.types.size() == 1) {
-						Value val = YAMLNodeToValue(node, bind_data.types[0]);
+				try {
+					if (bind_data.names.size() == 1 && bind_data.names[0] == "yaml") {
+						Value val = YAMLNodeToValue(node, bind_data.types[0], bind_data.options.ignore_errors);
 						output.SetValue(0, output_idx, val);
+					} else {
+						if (node.IsMap()) {
+							for (idx_t col_idx = 0; col_idx < bind_data.names.size(); col_idx++) {
+								const string &col_name = bind_data.names[col_idx];
+								const LogicalType &col_type = bind_data.types[col_idx];
+								YAML::Node value = node[col_name];
+								Value duckdb_value;
+								if (value) {
+									duckdb_value = YAMLNodeToValue(value, col_type, bind_data.options.ignore_errors);
+								} else {
+									duckdb_value = Value(col_type);
+								}
+								output.SetValue(col_idx, output_idx, duckdb_value);
+							}
+						} else if (bind_data.types.size() == 1) {
+							Value val = YAMLNodeToValue(node, bind_data.types[0], bind_data.options.ignore_errors);
+							output.SetValue(0, output_idx, val);
+						}
 					}
+
+				} catch (const OutOfMemoryException &) {
+					throw;
+				} catch (const std::exception &e) {
+					if (!bind_data.options.ignore_errors) {
+						throw IOException("YAML file '%s', document %llu: %s", filename,
+						                  (unsigned long long)DocumentIndex(lstate, node), ErrorData(e).RawMessage());
+					}
+					lstate.current_row_index++;
+					continue;
 				}
 
 				output_idx++;
@@ -1019,7 +828,7 @@ void YAMLReader::YAMLReadObjectsFunction(ClientContext &context, TableFunctionIn
 			continue;
 		} catch (const std::exception &e) {
 			if (!bind_data.options.ignore_errors) {
-				throw IOException("Error processing YAML file '" + filename + "': " + string(e.what()));
+				throw IOException("Error processing YAML file '" + filename + "': " + ErrorData(e).RawMessage());
 			}
 			lstate.ResetFileResources();
 			lstate.have_file = false;
@@ -1053,6 +862,7 @@ void YAMLReader::YAMLReadObjectsFunction(ClientContext &context, TableFunctionIn
 
 // Bind data structure for parse_yaml (immutable after bind)
 struct ParseYAMLBindData : public TableFunctionData {
+	bool values = false;
 	ParseYAMLBindData() = default;
 
 	vector<YAML::Node> yaml_docs;                                    // Parsed YAML documents
@@ -1111,10 +921,14 @@ unique_ptr<FunctionData> YAMLReader::ParseYAMLBind(ClientContext &context, Table
 			docs.push_back(YAML::Load(yaml_str));
 		}
 
+		for (auto &doc : docs) {
+			doc.reset(yaml_utils::ExpandMerges(doc));
+		}
+
 		// Extract row nodes (expand sequences if needed)
 		result->yaml_docs = ExtractRowNodes(docs, result->expand_root_sequence);
 	} catch (const YAML::Exception &e) {
-		throw InvalidInputException("Failed to parse YAML: %s", e.what());
+		throw InvalidInputException("Failed to parse YAML: %s", ErrorData(e).RawMessage());
 	}
 
 	if (result->yaml_docs.empty()) {
@@ -1127,7 +941,7 @@ unique_ptr<FunctionData> YAMLReader::ParseYAMLBind(ClientContext &context, Table
 	}
 
 	// Detect schema from all documents using jagged schema detection
-	LogicalType merged_type = DetectJaggedYAMLType(result->yaml_docs);
+	LogicalType merged_type = DetectJaggedYAMLType(context, result->yaml_docs);
 
 	if (merged_type.id() == LogicalTypeId::STRUCT) {
 		// Struct type - use struct fields as columns
@@ -1138,6 +952,7 @@ unique_ptr<FunctionData> YAMLReader::ParseYAMLBind(ClientContext &context, Table
 		}
 	} else {
 		// Non-struct type - return single yaml column
+		result->values = true;
 		names.emplace_back("yaml");
 		return_types.emplace_back(merged_type);
 	}
@@ -1171,7 +986,7 @@ void YAMLReader::ParseYAMLFunction(ClientContext &context, TableFunctionInput &d
 	for (idx_t doc_idx = 0; doc_idx < max_count; doc_idx++) {
 		YAML::Node node = bind_data.yaml_docs[local_state.current_row + doc_idx];
 
-		if (node.IsMap()) {
+		if (!bind_data.values) {
 			// Map node - process each field as a column
 			for (idx_t col_idx = 0; col_idx < bind_data.names.size(); col_idx++) {
 				const string &col_name = bind_data.names[col_idx];
