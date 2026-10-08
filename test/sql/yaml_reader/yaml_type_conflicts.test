@@ -61,6 +61,6 @@ SELECT name, metadata, tags
 FROM read_yaml('test/yaml/type_conflicts/*.yaml')
 ORDER BY name;
 ----
-file1	{author: John, version: 1.0}	[alpha, beta]
-file2	simple string value	single-tag
-file3	{author: Jane, created: 2024-01-15, extra_field: bonus}	[gamma]
+file1	{"author":"John","version":1.0}	["alpha","beta"]
+file2	"simple string value"	"single-tag"
+file3	{"author":"Jane","created":"2024-01-15","extra_field":"bonus"}	["gamma"]

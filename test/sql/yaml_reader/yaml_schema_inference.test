@@ -77,7 +77,7 @@ query IIIII
 SELECT typeof(id), typeof(name), typeof(email), typeof(phone), typeof(notes)
 FROM read_yaml('test/yaml/schema_inference/multiple_optional_fields.yaml') LIMIT 1;
 ----
-TINYINT	VARCHAR	VARCHAR	VARCHAR	VARCHAR
+BIGINT	VARCHAR	VARCHAR	VARCHAR	VARCHAR
 
 # ============================================================================
 # Comprehensive schema unioning tests (issue #32)
@@ -99,7 +99,7 @@ SELECT items FROM read_yaml('test/yaml/schema_inference/three_way_disjoint.yaml'
 query I
 SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/progressive_accumulation.yaml');
 ----
-STRUCT(a TINYINT, b TINYINT, c TINYINT, d TINYINT)[]
+STRUCT(a BIGINT, b BIGINT, c BIGINT, d BIGINT)[]
 
 query I
 SELECT items[4] FROM read_yaml('test/yaml/schema_inference/progressive_accumulation.yaml');
@@ -115,7 +115,7 @@ NULL
 query I
 SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/sparse_middle.yaml');
 ----
-STRUCT(id TINYINT, "name" VARCHAR, "temporary" VARCHAR)[]
+STRUCT(id BIGINT, "name" VARCHAR, "temporary" VARCHAR)[]
 
 query III
 SELECT items[1].temporary, items[2].temporary, items[4].temporary FROM read_yaml('test/yaml/schema_inference/sparse_middle.yaml');
@@ -126,13 +126,13 @@ NULL	only here	NULL
 query I
 SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/four_way_rotating.yaml');
 ----
-STRUCT(common TINYINT, only_first VARCHAR, only_second VARCHAR, only_third VARCHAR, only_fourth VARCHAR)[]
+STRUCT(common BIGINT, only_first VARCHAR, only_second VARCHAR, only_third VARCHAR, only_fourth VARCHAR)[]
 
 # Test 10: Last element has unique field (opposite of original bug)
 query I
 SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/last_element_unique.yaml');
 ----
-STRUCT(id TINYINT, "name" VARCHAR, final_only VARCHAR)[]
+STRUCT(id BIGINT, "name" VARCHAR, final_only VARCHAR)[]
 
 query I
 SELECT items[4].final_only FROM read_yaml('test/yaml/schema_inference/last_element_unique.yaml');
@@ -143,7 +143,7 @@ unique to last
 query I
 SELECT typeof(items) FROM read_yaml('test/yaml/schema_inference/empty_objects_mixed.yaml');
 ----
-STRUCT("name" VARCHAR, "value" TINYINT, extra VARCHAR)[]
+STRUCT("name" VARCHAR, "value" BIGINT, extra VARCHAR)[]
 
 query II
 SELECT items[1].name, items[2].name FROM read_yaml('test/yaml/schema_inference/empty_objects_mixed.yaml');
@@ -160,7 +160,7 @@ STRUCT("name" VARCHAR, email VARCHAR)[]	STRUCT(sku VARCHAR, price DOUBLE, discou
 query I
 SELECT typeof(data) FROM read_yaml('test/yaml/schema_inference/deeply_nested_jagged.yaml');
 ----
-STRUCT(level1 STRUCT(items STRUCT(id TINYINT, info STRUCT("name" VARCHAR, extra VARCHAR, deep STRUCT("value" VARCHAR)))[]))
+STRUCT(level1 STRUCT(items STRUCT(id BIGINT, info STRUCT("name" VARCHAR, extra VARCHAR, deep STRUCT("value" VARCHAR)))[]))
 
 query I
 SELECT data.level1.items[2].info.extra FROM read_yaml('test/yaml/schema_inference/deeply_nested_jagged.yaml');
@@ -211,7 +211,7 @@ SELECT typeof(docs) FROM read_yaml([
     'test/yaml/schema_inference/type_mismatch_scalar_struct.yaml'
 ]) LIMIT 1;
 ----
-yaml
+JSON
 
 # Both values should be preserved as YAML strings
 query II
@@ -220,5 +220,5 @@ SELECT extension.name, docs FROM read_yaml([
     'test/yaml/schema_inference/type_mismatch_scalar_struct.yaml'
 ]) ORDER BY extension.name;
 ----
-other_extension	{hello_world: Example code here, extended_description: More details}
-test_extension	https://example.com/docs
+other_extension	{"hello_world":"Example code here","extended_description":"More details"}
+test_extension	"https://example.com/docs"

@@ -143,7 +143,7 @@ std::vector<YAML::Node> ParseYAML(const std::string &yaml_str, bool multi_docume
 //===--------------------------------------------------------------------===//
 
 // Convert YAML node to JSON string
-std::string YAMLNodeToJSON(const YAML::Node &node);
+std::string YAMLNodeToJSON(const YAML::Node &node, bool inference = false);
 
 //===--------------------------------------------------------------------===//
 // DuckDB Value to YAML Conversion

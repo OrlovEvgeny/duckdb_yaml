@@ -17,7 +17,7 @@ FROM read_yaml('test/yaml/type_conflicts/*.yaml')
 ORDER BY name
 LIMIT 1;
 ----
-file1	yaml	yaml
+file1	JSON	JSON
 
 #
 # ============================================================================
@@ -32,7 +32,7 @@ FROM read_yaml('test/yaml/type_conflicts/*.yaml', sample_size=-1)
 ORDER BY name
 LIMIT 1;
 ----
-file1	yaml	yaml
+file1	JSON	JSON
 
 # Test: maximum_sample_files=-1 (unlimited) works
 query III
@@ -41,7 +41,7 @@ FROM read_yaml('test/yaml/type_conflicts/*.yaml', maximum_sample_files=-1)
 ORDER BY name
 LIMIT 1;
 ----
-file1	yaml	yaml
+file1	JSON	JSON
 
 # Test: Both parameters unlimited
 query III
@@ -50,7 +50,7 @@ FROM read_yaml('test/yaml/type_conflicts/*.yaml', sample_size=-1, maximum_sample
 ORDER BY name
 LIMIT 1;
 ----
-file1	yaml	yaml
+file1	JSON	JSON
 
 #
 # ============================================================================
@@ -82,7 +82,7 @@ FROM read_yaml('test/yaml/type_conflicts/*.yaml', sample_size=1000000)
 ORDER BY name
 LIMIT 1;
 ----
-file1	yaml	yaml
+file1	JSON	JSON
 
 # Test: Large maximum_sample_files works (larger than available files)
 query III
@@ -91,7 +91,7 @@ FROM read_yaml('test/yaml/type_conflicts/*.yaml', maximum_sample_files=1000)
 ORDER BY name
 LIMIT 1;
 ----
-file1	yaml	yaml
+file1	JSON	JSON
 
 # Test: sample_size=3 is enough to detect all variations (3 files, 1 row each)
 query III
@@ -100,7 +100,7 @@ FROM read_yaml('test/yaml/type_conflicts/*.yaml', sample_size=3)
 ORDER BY name
 LIMIT 1;
 ----
-file1	yaml	yaml
+file1	JSON	JSON
 
 # Test: maximum_sample_files=3 samples all files
 query III
@@ -109,7 +109,7 @@ FROM read_yaml('test/yaml/type_conflicts/*.yaml', maximum_sample_files=3)
 ORDER BY name
 LIMIT 1;
 ----
-file1	yaml	yaml
+file1	JSON	JSON
 
 #
 # ============================================================================
@@ -159,7 +159,7 @@ SELECT typeof(yaml)
 FROM read_yaml_objects('test/yaml/type_conflicts/*.yaml', sample_size=-1)
 LIMIT 1;
 ----
-STRUCT("name" VARCHAR, metadata yaml, tags yaml)
+STRUCT("name" VARCHAR, metadata JSON, tags JSON)
 
 # Test: read_yaml_objects supports maximum_sample_files parameter
 query I
@@ -167,7 +167,7 @@ SELECT typeof(yaml)
 FROM read_yaml_objects('test/yaml/type_conflicts/*.yaml', maximum_sample_files=-1)
 LIMIT 1;
 ----
-STRUCT("name" VARCHAR, metadata yaml, tags yaml)
+STRUCT("name" VARCHAR, metadata JSON, tags JSON)
 
 # Test: read_yaml_objects error on invalid sample_size
 statement error

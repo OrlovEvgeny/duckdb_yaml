@@ -1,0 +1,55 @@
+# name: test/sql/yaml_review_regressions.test
+# description: Scalar preservation, document recovery and bounded aliases
+# group: [yaml]
+
+require yaml
+
+query T
+SELECT yaml_to_json('a: off
+b: 0o17
+c: +1
+d: .5
+e: -.inf');
+----
+{"a":"off","b":"0o17","c":"+1","d":".5","e":"-.inf"}
+
+query TTTTTTTTT
+SELECT typeof(ports), ports[1], typeof(tagged), tagged, typeof(day), day, typeof(plain_day), typeof(clock), typeof(stamp)
+FROM parse_yaml('ports: ["22:22"]
+tagged: !!str 1:20
+day: "2024-01-15"
+plain_day: 2024-01-15
+clock: 12:30
+stamp: 2024-01-15T12:30:00Z');
+----
+VARCHAR[]	22:22	VARCHAR	1:20	VARCHAR	2024-01-15	DATE	TIME	TIMESTAMP WITH TIME ZONE
+
+query T
+SELECT yaml_to_json('a: 012
+b: 0x10
+c: .inf
+d: .nan
+e: yes
+f: on
+g: y
+h: True
+i: TRUE
+j: -0
+k: 123456789012345678901234567890');
+----
+{"a":"012","b":"0x10","c":".inf","d":".nan","e":"yes","f":"on","g":"y","h":"True","i":"TRUE","j":-0,"k":123456789012345678901234567890}
+
+statement ok
+COPY (SELECT 'version: 1.10
+big: 123456789012345678901234567890') TO '{TEST_DIR}/yaml_numbers.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+query TT
+SELECT version, big FROM read_yaml('{TEST_DIR}/yaml_numbers.yaml', columns={'version':'VARCHAR', 'big':'HUGEINT'});
+----
+1.10	123456789012345678901234567890
+
+query T
+SELECT big FROM read_yaml('{TEST_DIR}/yaml_numbers.yaml', columns={'big':'DECIMAL(38,0)'});
+----
+123456789012345678901234567890
+

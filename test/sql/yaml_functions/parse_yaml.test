@@ -23,7 +23,7 @@ query IIII
 SELECT name, typeof(name), age, typeof(age) FROM parse_yaml('name: John
 age: 30');
 ----
-John	VARCHAR	30	TINYINT
+John	VARCHAR	30	BIGINT
 
 #
 # ============================================================================
@@ -82,7 +82,7 @@ Carol	92
 query I
 SELECT count(*) FROM parse_yaml('[{a: 1}, {a: 2}]', expand_root_sequence=false);
 ----
-0
+1
 
 #
 # ============================================================================

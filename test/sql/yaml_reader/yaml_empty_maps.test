@@ -15,14 +15,14 @@ require yaml
 query I
 SELECT typeof(empty) FROM parse_yaml('empty: {}');
 ----
-yaml
+MAP(VARCHAR, JSON)
 
 # Test: Empty map with other fields
 query II
 SELECT name, typeof(data) FROM parse_yaml('name: test
 data: {}');
 ----
-test	yaml
+test	MAP(VARCHAR, JSON)
 
 # Test: Nested structure with empty map
 query III
@@ -31,14 +31,14 @@ config:
   settings: {}
   enabled: true');
 ----
-test	STRUCT(settings yaml, enabled BOOLEAN)	yaml
+test	STRUCT(settings MAP(VARCHAR, JSON), enabled BOOLEAN)	MAP(VARCHAR, JSON)
 
 # Test: Multiple empty maps
 query II
 SELECT typeof(a), typeof(b) FROM parse_yaml('a: {}
 b: {}');
 ----
-yaml	yaml
+MAP(VARCHAR, JSON)	MAP(VARCHAR, JSON)
 
 # Test: Empty map inside a list
 query I
@@ -48,7 +48,7 @@ SELECT typeof(items) FROM parse_yaml('items:
   - name: bar
     meta: {}');
 ----
-STRUCT("name" VARCHAR, meta yaml)[]
+STRUCT("name" VARCHAR, meta MAP(VARCHAR, JSON))[]
 
 # Test: Deeply nested empty map
 query I
@@ -58,7 +58,7 @@ SELECT typeof(root.level1.level2.empty) FROM parse_yaml('root:
       empty: {}
       value: 42');
 ----
-yaml
+MAP(VARCHAR, JSON)
 
 #
 # ============================================================================
@@ -77,7 +77,7 @@ DefaultImporter:
   assetBundleName:
   assetBundleVariant: ');
 ----
-2	abc123	STRUCT(externalObjects yaml, userData VARCHAR, assetBundleName VARCHAR, assetBundleVariant VARCHAR)
+2	abc123	STRUCT(externalObjects MAP(VARCHAR, JSON), userData "NULL", assetBundleName "NULL", assetBundleVariant "NULL")
 
 # Test: Multiple Unity-style imports with different structures
 query I
@@ -106,7 +106,7 @@ DefaultImporter:
 query I
 SELECT typeof(empty) FROM parse_yaml('empty: {}');
 ----
-yaml
+MAP(VARCHAR, JSON)
 
 #
 # ============================================================================
@@ -116,7 +116,7 @@ yaml
 
 # Test: Extracting from empty map returns NULL
 query I
-SELECT empty->>'$.key' FROM parse_yaml('empty: {}');
+SELECT empty['key'] FROM parse_yaml('empty: {}');
 ----
 NULL
 

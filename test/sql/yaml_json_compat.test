@@ -1,0 +1,138 @@
+# name: test/sql/yaml_json_compat.test
+# description: YAML documents share JSON inference and conversion
+# group: [yaml]
+
+require yaml
+
+require json
+
+query TTTTTTT
+SELECT country, typeof(country), typeof(version), quoted_version, sexagesimal, typeof(sexagesimal), absent IS NULL
+FROM parse_yaml('country: no
+version: 1.10
+quoted_version: "1.10"
+sexagesimal: 1:20
+absent: ~');
+----
+no	VARCHAR	DOUBLE	1.10	01:20:00	TIME	true
+
+query T
+SELECT yaml_to_json('country: no
+negative: -12
+version: 1.10
+quoted: "true"
+empty: ""
+absent: ~');
+----
+{"country":"no","negative":-12,"version":1.10,"quoted":"true","empty":"","absent":null}
+
+query TTT
+SELECT typeof(iso), typeof(us_date), typeof(eu_date)
+FROM parse_yaml('iso: 2024-01-15
+us_date: 01/15/2024
+eu_date: 15-01-2024');
+----
+DATE	VARCHAR	DATE
+
+query T
+SELECT eu_date FROM parse_yaml('eu_date: 15-01-2024');
+----
+2024-01-15
+
+statement ok
+COPY (SELECT '{"d":"2024-01-15"}') TO '{TEST_DIR}/quoted_date.json' (FORMAT CSV, HEADER false, QUOTE '');
+
+query TT
+SELECT typeof(y.d), typeof(j.d)
+FROM read_yaml('{TEST_DIR}/quoted_date.json') y, read_json('{TEST_DIR}/quoted_date.json') j;
+----
+VARCHAR	DATE
+
+statement ok
+COPY (SELECT 'Name: a
+---
+name: b') TO '{TEST_DIR}/case_keys.yml' (FORMAT CSV, HEADER false, QUOTE '');
+
+query TT
+SELECT Name, name_1 FROM read_yaml('{TEST_DIR}/case_keys.yml');
+----
+a	NULL
+NULL	b
+
+statement ok
+COPY (SELECT '[{"a":1},{"a":2}]') TO '{TEST_DIR}/root_sequence.yml' (FORMAT CSV, HEADER false, QUOTE '');
+
+query II
+SELECT (SELECT count(*) FROM read_yaml('{TEST_DIR}/root_sequence.yml')),
+       (SELECT count(*) FROM read_yaml('{TEST_DIR}/root_sequence.yml', expand_root_sequence=false));
+----
+2	1
+
+query T
+SELECT json FROM read_yaml('{TEST_DIR}/root_sequence.yml', expand_root_sequence=false);
+----
+[{'a': 1}, {'a': 2}]
+
+statement ok
+COPY (SELECT 'id: 1
+items: []
+obj: {a: 1}
+value: 7
+---
+id: 2.5
+items: [1, 2.5]
+obj: {b: true}
+value: text
+---
+id: ~
+items: [3]
+obj: {}
+value: {nested: true}') TO '{TEST_DIR}/docs.yaml' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement ok
+COPY (SELECT '{"id":1,"items":[],"obj":{"a":1},"value":7}
+{"id":2.5,"items":[1,2.5],"obj":{"b":true},"value":"text"}
+{"id":null,"items":[3],"obj":{},"value":{"nested":true}}') TO '{TEST_DIR}/docs.json' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement ok
+CREATE TABLE y AS SELECT * FROM read_yaml('{TEST_DIR}/docs.yaml');
+
+statement ok
+CREATE TABLE j AS SELECT * FROM read_json('{TEST_DIR}/docs.json');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM y EXCEPT ALL SELECT * FROM j) UNION ALL (SELECT * FROM j EXCEPT ALL SELECT * FROM y));
+----
+0
+
+query I
+SELECT count(*) FROM ((DESCRIBE y) EXCEPT (DESCRIBE j));
+----
+0
+
+query I
+SELECT count(*) FROM read_yaml('{TEST_DIR}/*.yaml');
+----
+3
+
+# A record whose only field is named value must not become an entire object.
+query I
+SELECT value FROM parse_yaml('value: 42');
+----
+42
+
+query I
+SELECT count(*) FROM parse_yaml('[1, 2, 3]', expand_root_sequence=false);
+----
+1
+
+query I
+SELECT count(*) FROM parse_yaml('---
+1
+---
+~
+---
+[2, 3]', expand_root_sequence=false);
+----
+2
+

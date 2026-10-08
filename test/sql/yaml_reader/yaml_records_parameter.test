@@ -46,7 +46,7 @@ query II
 SELECT typeof(id), typeof(value)
 FROM read_yaml('test/yaml/schema_inference/records_nested.yaml', records := 'data.items') LIMIT 1;
 ----
-TINYINT	VARCHAR
+BIGINT	VARCHAR
 
 # Test: Three-level nested path (config.database.tables)
 query II
@@ -61,7 +61,7 @@ query II
 SELECT typeof(name), typeof(columns)
 FROM read_yaml('test/yaml/schema_inference/records_deep_nested.yaml', records := 'config.database.tables') LIMIT 1;
 ----
-VARCHAR	TINYINT
+VARCHAR	BIGINT
 
 # ============================================================================
 # Single Element Array
@@ -78,7 +78,7 @@ query III
 SELECT typeof(id), typeof(name), typeof(active)
 FROM read_yaml('test/yaml/schema_inference/records_single_element.yaml', records := 'data.records');
 ----
-TINYINT	VARCHAR	BOOLEAN
+BIGINT	VARCHAR	BOOLEAN
 
 # ============================================================================
 # Mixed Content Handling
