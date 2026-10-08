@@ -598,7 +598,7 @@ static YAML::Node YAMLMergePatch(const YAML::Node &target, const YAML::Node &pat
 	// Apply patch
 	for (auto it = patch.begin(); it != patch.end(); ++it) {
 		string key = it->first.Scalar();
-		const YAML::Node &patch_value = it->second;
+		const YAML::Node patch_value = it->second;
 
 		if (patch_value.IsNull()) {
 			// Null value removes the key
